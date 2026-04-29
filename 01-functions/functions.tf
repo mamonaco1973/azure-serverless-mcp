@@ -47,6 +47,8 @@ resource "azurerm_function_app_flex_consumption" "cost_mcp" {
   maximum_instance_count = 10
   instance_memory_in_mb  = 2048
 
+  site_config {}
+
   # System-assigned identity used by the function code to call Cost Management
   # via DefaultAzureCredential — no credentials in app settings.
   identity {
