@@ -194,6 +194,13 @@ def _rg_query(kql: str) -> list:
     return result.data or []
 
 
+def _get_body(req: func.HttpRequest) -> dict:
+    try:
+        return req.get_json()
+    except ValueError:
+        return {}
+
+
 def _text_resp(body: str) -> func.HttpResponse:
     return func.HttpResponse(body, status_code=200, mimetype="text/plain")
 
@@ -299,7 +306,7 @@ def by_tag_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _unauthorized()
     _audit_log(req, "find_resources_by_tag")
     try:
-        body      = req.get_json(silent=True) or {}
+        body      = _get_body(req)
         tag_key   = str(body.get("tag_key",   "")).strip()
         tag_value = str(body.get("tag_value", "")).strip()
         if not tag_key or not tag_value:
@@ -365,7 +372,7 @@ def by_region_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _unauthorized()
     _audit_log(req, "find_resources_by_region")
     try:
-        body   = req.get_json(silent=True) or {}
+        body   = _get_body(req)
         region = str(body.get("region", "")).strip().lower()
         if not region:
             return func.HttpResponse("region is required", status_code=400)
