@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import calendar
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -236,7 +237,8 @@ def _query_total(start: datetime, end: datetime) -> tuple:
     Returns:
         Tuple of (cost_float, currency_string).
     """
-    result = _cost_client.query.usage(
+    result = _cm_call(
+        _cost_client.query.usage,
         scope=SCOPE,
         parameters=QueryDefinition(
             type="ActualCost",
@@ -256,16 +258,44 @@ def _query_total(start: datetime, end: datetime) -> tuple:
     return float(result.rows[0][ci]), _currency(result.columns, result.rows)
 
 
+def _cm_call(fn, *args, **kwargs):
+    """Call a Cost Management SDK method, retrying on 429 with exponential backoff.
+
+    Args:
+        fn: Callable SDK method to invoke.
+        *args: Positional arguments forwarded to fn.
+        **kwargs: Keyword arguments forwarded to fn.
+
+    Returns:
+        The result of fn(*args, **kwargs).
+
+    Raises:
+        Exception: Re-raises after 3 retries or on non-429 errors.
+    """
+    wait = 5
+    for attempt in range(4):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            is_rate_limited = "429" in msg or "too many requests" in msg.lower()
+            if is_rate_limited and attempt < 3:
+                logging.warning(
+                    "Cost Management rate limited — retrying in %ds (attempt %d)",
+                    wait, attempt + 1,
+                )
+                time.sleep(wait)
+                wait *= 2
+                continue
+            raise
+
+
 def _text_resp(body: str) -> func.HttpResponse:
     return func.HttpResponse(body, status_code=200, mimetype="text/plain")
 
 
 def _error_resp(exc: Exception) -> func.HttpResponse:
-    msg = str(exc)
-    # Propagate Cost Management rate-limit responses so callers can back off.
-    if "429" in msg or "too many requests" in msg.lower():
-        return func.HttpResponse(msg, status_code=429, mimetype="text/plain")
-    return func.HttpResponse(msg, status_code=500, mimetype="text/plain")
+    return func.HttpResponse(str(exc), status_code=500, mimetype="text/plain")
 
 
 # ================================================================================
@@ -308,7 +338,8 @@ def by_service_handler(req: func.HttpRequest) -> func.HttpResponse:
     _audit_log(req, "get_cost_by_service")
     try:
         start, end = _mtd_window()
-        result = _cost_client.query.usage(
+        result = _cm_call(
+            _cost_client.query.usage,
             scope=SCOPE,
             parameters=QueryDefinition(
                 type="ActualCost",
@@ -388,7 +419,8 @@ def daily_handler(req: func.HttpRequest) -> func.HttpResponse:
     _audit_log(req, "get_daily_cost_trend")
     try:
         start, end = _mtd_window()
-        result = _cost_client.query.usage(
+        result = _cm_call(
+            _cost_client.query.usage,
             scope=SCOPE,
             parameters=QueryDefinition(
                 type="ActualCost",
@@ -433,7 +465,8 @@ def top_drivers_handler(req: func.HttpRequest) -> func.HttpResponse:
     _audit_log(req, "find_top_cost_drivers")
     try:
         start, end = _mtd_window()
-        result = _cost_client.query.usage(
+        result = _cm_call(
+            _cost_client.query.usage,
             scope=SCOPE,
             parameters=QueryDefinition(
                 type="ActualCost",
@@ -486,7 +519,8 @@ def forecast_handler(req: func.HttpRequest) -> func.HttpResponse:
         # Actual MTD gives the already-incurred portion of the month.
         mtd_cost, currency = _query_total(today.replace(day=1), today)
 
-        result = _cost_client.forecast.usage(
+        result = _cm_call(
+            _cost_client.forecast.usage,
             scope=SCOPE,
             parameters=ForecastDefinition(
                 type="ActualCost",
