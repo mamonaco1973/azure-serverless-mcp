@@ -17,21 +17,14 @@ set -euo pipefail
 echo "NOTE: Reading deployment outputs..."
 
 cd 01-functions
-KV_NAME=$(terraform output -raw key_vault_name)
 FUNC_APP_URL=$(terraform output -raw function_app_url)
+CLIENT_ID=$(terraform output -raw proxy_client_id)
+CLIENT_SECRET=$(terraform output -raw proxy_client_secret)
+TENANT_ID=$(terraform output -raw proxy_tenant_id)
+API_CLIENT_ID=$(terraform output -raw proxy_api_client_id)
 cd ..
 
-echo "NOTE: Key vault:    ${KV_NAME}"
 echo "NOTE: API base URL: ${FUNC_APP_URL}"
-
-CLIENT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-client-id" --query value -o tsv)
-CLIENT_SECRET=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-client-secret" --query value -o tsv)
-TENANT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-tenant-id" --query value -o tsv)
-API_CLIENT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "api-client-id" --query value -o tsv)
 
 # ================================================================================
 # Acquire Bearer token
@@ -88,7 +81,8 @@ call_api() {
   if [[ "$http_code" == "200" ]]; then
     echo "NOTE: OK  ${method} /${route}"
     if [[ "$route" == "tools" ]]; then
-      echo "$response" | jq -r '.[] | "       \(.name)  →  \(.route)"'
+      echo "$response" | jq -r '.[] | "\(.name)\t\(.route)"' \
+        | column -t -s $'\t' | sed 's/^/       /'
     else
       echo "$response" | sed 's/^/       /'
     fi
@@ -113,11 +107,12 @@ call_api "POST" "resources/resource-groups"
 call_api "POST" "resources/count-by-type"
 call_api "POST" "resources/by-tag"   '{"tag_key":"environment","tag_value":"test"}'
 call_api "POST" "resources/public-ips"
+call_api "POST" "resources/by-resource-group" '{"resource_group":"rg-mcp-rg"}'
 call_api "POST" "resources/by-region" '{"region":"centralus"}'
 
 echo ""
 echo "========================================================================"
-echo "  Validation complete — all 7 endpoints returned HTTP 200."
+echo "  Validation complete — all 8 endpoints returned HTTP 200."
 echo "========================================================================"
 echo "  API: ${FUNC_APP_URL}"
 echo "========================================================================"

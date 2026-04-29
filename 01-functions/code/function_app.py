@@ -83,6 +83,23 @@ TOOL_REGISTRY = [
         "route": "/resources/public-ips",
     },
     {
+        "name": "find_resources_by_resource_group",
+        "description": (
+            "Lists all resources deployed in a specific resource group."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "resource_group": {
+                    "type": "string",
+                    "description": "Resource group name, e.g. 'my-rg'",
+                },
+            },
+            "required": ["resource_group"],
+        },
+        "route": "/resources/by-resource-group",
+    },
+    {
         "name": "find_resources_by_region",
         "description": (
             "Lists all resources deployed in a specific Azure region "
@@ -363,6 +380,36 @@ def public_ips_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _text_resp("\n".join(lines))
     except Exception as exc:
         logging.error("public_ips_handler: %s", exc)
+        return _error_resp(exc)
+
+
+@app.route(route="resources/by-resource-group", methods=["POST"])
+def by_resource_group_handler(req: func.HttpRequest) -> func.HttpResponse:
+    if not _validate_token(req):
+        return _unauthorized()
+    _audit_log(req, "find_resources_by_resource_group")
+    try:
+        body           = _get_body(req)
+        resource_group = str(body.get("resource_group", "")).strip()
+        if not resource_group:
+            return func.HttpResponse("resource_group is required", status_code=400)
+        kql_rg = resource_group.replace("'", "''")
+        rows = _rg_query(f"""
+            Resources
+            | where resourceGroup =~ '{kql_rg}'
+            | project name, type, location
+            | order by type asc, name asc
+        """)
+        lines = [f"Resources in {resource_group} ({len(rows)} total):", ""]
+        for r in rows:
+            lines.append(
+                f"  {r['name']:<30}  {r['type']:<50}  {r['location']}"
+            )
+        if not rows:
+            lines.append(f"  (no resources found in {resource_group})")
+        return _text_resp("\n".join(lines))
+    except Exception as exc:
+        logging.error("by_resource_group_handler: %s", exc)
         return _error_resp(exc)
 
 

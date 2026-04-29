@@ -4,7 +4,7 @@
 #
 # Purpose:
 #   Orchestrates end-to-end deployment of the Azure Resource MCP stack:
-#   environment validation → Terraform (infra + Entra + Key Vault) →
+#   environment validation → Terraform (infra + Entra) →
 #   function code deploy → Claude Desktop config generation → validation.
 # ================================================================================
 
@@ -29,13 +29,15 @@ terraform apply -auto-approve
 
 RESOURCE_GROUP=$(terraform output -raw resource_group_name)
 FUNC_APP_NAME=$(terraform output -raw function_app_name)
-KV_NAME=$(terraform output -raw key_vault_name)
 FUNC_APP_URL=$(terraform output -raw function_app_url)
+CLIENT_ID=$(terraform output -raw proxy_client_id)
+CLIENT_SECRET=$(terraform output -raw proxy_client_secret)
+TENANT_ID=$(terraform output -raw proxy_tenant_id)
+API_CLIENT_ID=$(terraform output -raw proxy_api_client_id)
 cd ..
 
 echo "NOTE: Resource group: ${RESOURCE_GROUP}"
 echo "NOTE: Function app:   ${FUNC_APP_NAME}"
-echo "NOTE: Key vault:      ${KV_NAME}"
 
 # ================================================================================
 # Deploy function code
@@ -63,20 +65,36 @@ cd ../..
 # Generate Claude Desktop MCP config
 # ================================================================================
 
-# Config JSONs are built by Terraform with all secrets embedded and stored in
-# Key Vault as single secrets. Read them out directly — no envsubst needed.
-echo "NOTE: Reading Claude Desktop configs from Key Vault..."
+# Build config files directly from Terraform outputs using jq — no Key Vault
+# or envsubst needed. Output files are gitignored as they contain real secrets.
+echo "NOTE: Generating Claude Desktop config files..."
 
-az keyvault secret show \
-  --vault-name "$KV_NAME" --name "claude-desktop-config-ps1" \
-  --query value -o tsv > 02-proxy/claude_desktop_config_ps1.json
+jq -n \
+  --arg cid  "$CLIENT_ID" \
+  --arg csec "$CLIENT_SECRET" \
+  --arg tid  "$TENANT_ID" \
+  --arg acid "$API_CLIENT_ID" \
+  --arg url  "$FUNC_APP_URL" \
+  '{mcpServers: {"azure-resource-mcp": {command: "powershell",
+    args: ["-File", "REPLACE_WITH_ABSOLUTE_PATH\\azure-serverless-mcp\\02-proxy\\proxy.ps1"],
+    env: {MCP_CLIENT_ID: $cid, MCP_CLIENT_SECRET: $csec,
+          MCP_TENANT_ID: $tid, MCP_API_CLIENT_ID: $acid, MCP_API_ENDPOINT: $url}}}}' \
+  > 02-proxy/claude_desktop_config_ps1.json
 
-az keyvault secret show \
-  --vault-name "$KV_NAME" --name "claude-desktop-config-sh" \
-  --query value -o tsv > 02-proxy/claude_desktop_config_sh.json
+jq -n \
+  --arg cid  "$CLIENT_ID" \
+  --arg csec "$CLIENT_SECRET" \
+  --arg tid  "$TENANT_ID" \
+  --arg acid "$API_CLIENT_ID" \
+  --arg url  "$FUNC_APP_URL" \
+  '{mcpServers: {"azure-resource-mcp": {command: "bash",
+    args: ["REPLACE_WITH_ABSOLUTE_PATH/azure-serverless-mcp/02-proxy/proxy.sh"],
+    env: {MCP_CLIENT_ID: $cid, MCP_CLIENT_SECRET: $csec,
+          MCP_TENANT_ID: $tid, MCP_API_CLIENT_ID: $acid, MCP_API_ENDPOINT: $url}}}}' \
+  > 02-proxy/claude_desktop_config_sh.json
 
 echo "NOTE: Configs written to 02-proxy/claude_desktop_config_ps1.json"
-echo "NOTE:                 and 02-proxy/claude_desktop_config_sh.json"
+echo "NOTE: Configs written to 02-proxy/claude_desktop_config_sh.json"
 
 # ================================================================================
 # Post-deployment validation
