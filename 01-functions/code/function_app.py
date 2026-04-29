@@ -272,20 +272,19 @@ def _cm_call(fn, *args, **kwargs):
     Raises:
         Exception: Re-raises after 3 retries or on non-429 errors.
     """
-    wait = 5
-    for attempt in range(4):
+    waits = [30, 60, 90]
+    for attempt, wait in enumerate(waits + [None]):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
             msg = str(exc)
             is_rate_limited = "429" in msg or "too many requests" in msg.lower()
-            if is_rate_limited and attempt < 3:
+            if is_rate_limited and wait is not None:
                 logging.warning(
                     "Cost Management rate limited — retrying in %ds (attempt %d)",
                     wait, attempt + 1,
                 )
                 time.sleep(wait)
-                wait *= 2
                 continue
             raise
 
