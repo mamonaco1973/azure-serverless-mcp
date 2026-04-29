@@ -31,7 +31,7 @@ TENANT_ID       = os.environ["TENANT_ID"]
 SCOPE = f"/subscriptions/{SUBSCRIPTION_ID}"
 
 _credential  = DefaultAzureCredential()
-_cost_client = CostManagementClient(_credential, SUBSCRIPTION_ID)
+_cost_client = CostManagementClient(_credential)
 _jwks_cache  = None
 
 # ================================================================================
