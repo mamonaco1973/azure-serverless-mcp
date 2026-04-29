@@ -90,7 +90,7 @@ call_api() {
     if [[ "$route" == "tools" ]]; then
       echo "$response" | jq -r '.[] | "       \(.name)  →  \(.route)"'
     else
-      echo "$response" | head -4 | sed 's/^/       /'
+      echo "$response" | sed 's/^/       /'
     fi
   else
     echo "ERROR: FAIL ${method} /${route} — HTTP ${http_code}"
