@@ -3,7 +3,7 @@
 # File: destroy.sh
 #
 # Purpose:
-#   Tears down the Azure Cost MCP API stack deployed by apply.sh.
+#   Tears down the Azure Resource MCP stack deployed by apply.sh.
 #   Destroys the Function App, Key Vault, Entra app registrations,
 #   storage, and the resource group.
 # ================================================================================

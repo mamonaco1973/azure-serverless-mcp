@@ -3,7 +3,7 @@
 # File: apply.sh
 #
 # Purpose:
-#   Orchestrates end-to-end deployment of the Azure Cost MCP API stack:
+#   Orchestrates end-to-end deployment of the Azure Resource MCP stack:
 #   environment validation → Terraform (infra + Entra + Key Vault) →
 #   function code deploy → Claude Desktop config generation → validation.
 # ================================================================================

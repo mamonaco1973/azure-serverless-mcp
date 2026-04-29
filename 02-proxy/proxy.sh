@@ -3,7 +3,7 @@
 # File: proxy.sh
 #
 # Purpose:
-#   MCP stdio proxy for the Azure Cost Management serverless API. Reads JSON-RPC
+#   MCP stdio proxy for the Azure Resource Graph serverless API. Reads JSON-RPC
 #   2.0 messages from stdin, acquires a Bearer token from Azure AD using the
 #   client-credentials flow, and forwards tool calls to the Function App.
 #   The AI caller sees a local MCP server — the Azure backend is transparent.
@@ -21,7 +21,7 @@
 #   MCP_TENANT_ID      Azure AD tenant ID
 #   MCP_API_CLIENT_ID  API app registration client ID (used as token scope)
 #   MCP_API_ENDPOINT   Function App base URL — no trailing slash
-#                      (e.g. https://cost-mcp-func-xxxx.azurewebsites.net/api)
+#                      (e.g. https://rg-mcp-func-xxxx.azurewebsites.net/api)
 # ================================================================================
 
 set -euo pipefail
@@ -165,7 +165,7 @@ handle_initialize() {
     result=$(jq -cn '{
         "protocolVersion": "2025-11-25",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "azure-cost-mcp", "version": "1.0.0"}
+        "serverInfo": {"name": "azure-resource-mcp", "version": "1.0.0"}
     }')
     send_response "$id" "$result"
 }
@@ -211,7 +211,7 @@ handle_tools_call() {
 # Main
 # ================================================================================
 
-echo "NOTE: Azure Cost MCP proxy started." >&2
+echo "NOTE: Azure Resource MCP proxy started." >&2
 echo "NOTE: Endpoint: ${API_ENDPOINT}" >&2
 
 load_tool_registry
