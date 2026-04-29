@@ -1,0 +1,18 @@
+{
+  "preferences": {
+    "coworkWebSearchEnabled": true,
+    "coworkScheduledTasksEnabled": false,
+    "ccdScheduledTasksEnabled": true
+  },
+  "mcpServers": {
+    "aws-costs": {
+      "command": "bash",
+      "args": ["C:\\cloudenv\\aws-serverless-mcp\\02-proxy\\proxy.sh"],
+      "env": {
+        "MCP_ACCESS_KEY_ID":     "${MCP_ACCESS_KEY_ID}",
+        "MCP_SECRET_ACCESS_KEY": "${MCP_SECRET_ACCESS_KEY}",
+        "MCP_API_ENDPOINT":      "${MCP_API_ENDPOINT}"
+      }
+    }
+  }
+}

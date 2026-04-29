@@ -1,0 +1,115 @@
+<mxfile host="app.diagrams.net" agent="Claude">
+  <diagram id="proxy-flow" name="Proxy Flow">
+    <mxGraphModel grid="1" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="950" pageHeight="1900" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="s1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="145" width="750" x="75" y="82" as="geometry" />
+        </mxCell>
+        <mxCell id="s1n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#b85450;strokeColor=#b85450;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="①" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="97" as="geometry" />
+        </mxCell>
+        <mxCell id="s1t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Proxy Startup — Tool Discovery&lt;/b&gt; &lt;i&gt;(runs once, before the MCP loop starts)&lt;/i&gt;&lt;br&gt;The proxy signs a &lt;tt&gt;GET /tools&lt;/tt&gt; request with SigV4 and calls the backend. API Gateway validates&lt;br&gt;the IAM signature and invokes the &lt;b&gt;cost-tools&lt;/b&gt; Lambda, which returns &lt;tt&gt;TOOL_REGISTRY&lt;/tt&gt; from&lt;br&gt;&lt;tt&gt;costs.py&lt;/tt&gt; as a JSON array. Each entry includes the MCP fields (&lt;tt&gt;name&lt;/tt&gt;, &lt;tt&gt;description&lt;/tt&gt;,&lt;br&gt;&lt;tt&gt;inputSchema&lt;/tt&gt;) plus a &lt;tt&gt;route&lt;/tt&gt; field the proxy uses for dispatch.&lt;br&gt;The proxy builds its route map and tool schema list from this response. No tool definitions&lt;br&gt;are hardcoded — add a tool in &lt;tt&gt;costs.py&lt;/tt&gt;, redeploy, and the proxy picks it up automatically." vertex="1">
+          <mxGeometry height="130" width="657" x="158" y="92" as="geometry" />
+        </mxCell>
+        <mxCell id="a12" edge="1" parent="1" source="s1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="s2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="125" width="750" x="75" y="257" as="geometry" />
+        </mxCell>
+        <mxCell id="s2n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="②" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="272" as="geometry" />
+        </mxCell>
+        <mxCell id="s2t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;AI Sends a Tool Call&lt;/b&gt;&lt;br&gt;Claude Desktop sends a JSON-RPC 2.0 message over stdio to the proxy process:&lt;br&gt;&lt;tt&gt;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;get_month_to_date_cost&quot;,&quot;arguments&quot;:{}}}&lt;/tt&gt;&lt;br&gt;The proxy reads one newline-delimited JSON message at a time from stdin. Notifications (no id) are silently discarded." vertex="1">
+          <mxGeometry height="110" width="657" x="158" y="267" as="geometry" />
+        </mxCell>
+        <mxCell id="a23" edge="1" parent="1" source="s2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="115" width="750" x="75" y="412" as="geometry" />
+        </mxCell>
+        <mxCell id="s3n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d6b656;strokeColor=#d6b656;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="③" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="427" as="geometry" />
+        </mxCell>
+        <mxCell id="s3t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Route Lookup from Cached Registry&lt;/b&gt;&lt;br&gt;The proxy looks up the tool name in the route map built at startup:&lt;br&gt;&lt;tt&gt;get_month_to_date_cost → /cost/month-to-date&lt;/tt&gt;&lt;br&gt;If the name is unknown, the proxy writes a JSON-RPC error (-32602) to stdout without making any&lt;br&gt;HTTP request. No network call is made until the route is confirmed." vertex="1">
+          <mxGeometry height="100" width="657" x="158" y="422" as="geometry" />
+        </mxCell>
+        <mxCell id="a34" edge="1" parent="1" source="s3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="140" width="750" x="75" y="557" as="geometry" />
+        </mxCell>
+        <mxCell id="s4n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="④" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="572" as="geometry" />
+        </mxCell>
+        <mxCell id="s4t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Build the Canonical Request&lt;/b&gt;&lt;br&gt;SigV4 requires a deterministic string that exactly describes the request. The proxy assembles:&lt;br&gt;&lt;b&gt;Method:&lt;/b&gt; POST &amp;nbsp;&lt;b&gt;URI:&lt;/b&gt; /cost/month-to-date &amp;nbsp;&lt;b&gt;Query:&lt;/b&gt; (empty)&lt;br&gt;&lt;b&gt;Headers (sorted):&lt;/b&gt; content-type, host, x-amz-date, x-mcp-user &amp;nbsp;&lt;b&gt;Body hash:&lt;/b&gt; SHA-256({})&lt;br&gt;The &lt;b&gt;x-mcp-user&lt;/b&gt; header carries the OS username — it is included in signed headers so it cannot be&lt;br&gt;dropped or altered after signing without breaking the signature." vertex="1">
+          <mxGeometry height="125" width="657" x="158" y="567" as="geometry" />
+        </mxCell>
+        <mxCell id="a45" edge="1" parent="1" source="s4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="145" width="750" x="75" y="727" as="geometry" />
+        </mxCell>
+        <mxCell id="s5n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d6b656;strokeColor=#d6b656;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="⑤" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="742" as="geometry" />
+        </mxCell>
+        <mxCell id="s5t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Derive the Signing Key (4-Step HMAC Chain)&lt;/b&gt;&lt;br&gt;Starting from the IAM secret access key, the proxy runs four HMAC-SHA256 operations:&lt;br&gt;&lt;tt&gt;kDate    = HMAC(&quot;AWS4&quot; + secret,  date_stamp)&lt;/tt&gt;&lt;br&gt;&lt;tt&gt;kRegion  = HMAC(kDate,            region)&lt;/tt&gt;&lt;br&gt;&lt;tt&gt;kService = HMAC(kRegion,          &quot;execute-api&quot;)&lt;/tt&gt;&lt;br&gt;&lt;tt&gt;kSigning = HMAC(kService,         &quot;aws4_request&quot;)&lt;/tt&gt;&lt;br&gt;The final signature is &lt;tt&gt;HMAC(kSigning, string_to_sign)&lt;/tt&gt; — derived fresh every request, never cached." vertex="1">
+          <mxGeometry height="130" width="657" x="158" y="737" as="geometry" />
+        </mxCell>
+        <mxCell id="a56" edge="1" parent="1" source="s5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="130" width="750" x="75" y="902" as="geometry" />
+        </mxCell>
+        <mxCell id="s6n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#82b366;strokeColor=#82b366;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="⑥" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="917" as="geometry" />
+        </mxCell>
+        <mxCell id="s6t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Send Signed HTTPS POST to API Gateway&lt;/b&gt;&lt;br&gt;The proxy issues: &lt;tt&gt;POST https://{api-id}.execute-api.us-east-1.amazonaws.com/cost/month-to-date&lt;/tt&gt;&lt;br&gt;with headers: &lt;tt&gt;Authorization: AWS4-HMAC-SHA256 Credential=.../Signature=...&lt;/tt&gt;&lt;br&gt;&lt;tt&gt;x-amz-date: 20260427T143022Z &amp;nbsp; x-mcp-user: mike &amp;nbsp; Content-Type: application/json&lt;/tt&gt;&lt;br&gt;Body: &lt;tt&gt;{}&lt;/tt&gt; &amp;nbsp;(all tools take no parameters — cost window is always current month / today)" vertex="1">
+          <mxGeometry height="115" width="657" x="158" y="912" as="geometry" />
+        </mxCell>
+        <mxCell id="a67" edge="1" parent="1" source="s6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="135" width="750" x="75" y="1062" as="geometry" />
+        </mxCell>
+        <mxCell id="s7n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d79b00;strokeColor=#d79b00;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="⑦" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="1077" as="geometry" />
+        </mxCell>
+        <mxCell id="s7t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;API Gateway Validates AWS_IAM Authorization&lt;/b&gt;&lt;br&gt;API Gateway reconstructs the canonical request from the incoming headers, locates the IAM secret key&lt;br&gt;using the access key ID in the Authorization header, and computes the expected signature.&lt;br&gt;If the signatures match, it checks the caller&#39;s IAM identity against the route policy:&lt;br&gt;&lt;tt&gt;execute-api:Invoke&lt;/tt&gt; on this specific API. Only the &lt;b&gt;cost-mcp-proxy&lt;/b&gt; IAM user is granted this permission.&lt;br&gt;Any other caller — or a tampered request — is rejected with &lt;b&gt;403 Forbidden&lt;/b&gt; before Lambda is invoked." vertex="1">
+          <mxGeometry height="120" width="657" x="158" y="1072" as="geometry" />
+        </mxCell>
+        <mxCell id="a78" edge="1" parent="1" source="s7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="145" width="750" x="75" y="1227" as="geometry" />
+        </mxCell>
+        <mxCell id="s8n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#9673a6;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="⑧" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="1242" as="geometry" />
+        </mxCell>
+        <mxCell id="s8t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Lambda Handler Runs — Queries Cost Explorer&lt;/b&gt;&lt;br&gt;The matched handler in &lt;b&gt;costs.py&lt;/b&gt; executes (e.g. &lt;tt&gt;mtd_handler&lt;/tt&gt;). First line: audit log to CloudWatch:&lt;br&gt;&lt;tt&gt;AUDIT tool=get_month_to_date_cost user=mike&lt;/tt&gt;&lt;br&gt;Then &lt;tt&gt;boto3 ce.get_cost_and_usage()&lt;/tt&gt; is called — Cost Explorer is a global AWS service,&lt;br&gt;the boto3 client always targets &lt;b&gt;us-east-1&lt;/b&gt; regardless of Lambda deployment region.&lt;br&gt;The raw CE response (nested ResultsByTime arrays) is summarized into plain text:&lt;br&gt;&lt;i&gt;&quot;Month-to-date AWS cost (2026-04-01 through 2026-04-27): $42.17 USD&quot;&lt;/i&gt;" vertex="1">
+          <mxGeometry height="130" width="657" x="158" y="1237" as="geometry" />
+        </mxCell>
+        <mxCell id="a89" edge="1" parent="1" source="s8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" target="s9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s9" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;arcSize=4;" value="" vertex="1">
+          <mxGeometry height="135" width="750" x="75" y="1402" as="geometry" />
+        </mxCell>
+        <mxCell id="s9n" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#82b366;strokeColor=#82b366;fontSize=26;fontStyle=1;fontColor=#ffffff;align=center;verticalAlign=middle;" value="⑨" vertex="1">
+          <mxGeometry height="56" width="56" x="90" y="1417" as="geometry" />
+        </mxCell>
+        <mxCell id="s9t" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;" value="&lt;b&gt;Result Returns to the AI&lt;/b&gt;&lt;br&gt;The plain-text response body travels back through API Gateway to the proxy. The proxy wraps it&lt;br&gt;as an MCP content block and writes the JSON-RPC response to stdout:&lt;br&gt;&lt;tt&gt;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;result&quot;:{&quot;content&quot;:[{&quot;type&quot;:&quot;text&quot;,&quot;text&quot;:&quot;Month-to-date...&quot;}]}}&lt;/tt&gt;&lt;br&gt;Claude Desktop reads the response, and Claude narrates the result directly to the user.&lt;br&gt;The Lambda backend is completely transparent — the AI sees only a local MCP tool call." vertex="1">
+          <mxGeometry height="120" width="657" x="158" y="1412" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
