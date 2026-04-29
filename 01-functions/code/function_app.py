@@ -252,7 +252,7 @@ def _query_total(start: datetime, end: datetime) -> tuple:
     )
     if not result.rows:
         return 0.0, "USD"
-    ci = _col_idx(result.columns, "cost")
+    ci = _col_idx(result.columns, "PreTaxCost")
     return float(result.rows[0][ci]), _currency(result.columns, result.rows)
 
 
@@ -323,7 +323,7 @@ def by_service_handler(req: func.HttpRequest) -> func.HttpResponse:
                 ),
             ),
         )
-        ci   = _col_idx(result.columns, "cost")
+        ci   = _col_idx(result.columns, "PreTaxCost")
         si   = _col_idx(result.columns, "ServiceName")
         rows = sorted(result.rows, key=lambda r: float(r[ci]), reverse=True)
         today = _today()
@@ -400,7 +400,7 @@ def daily_handler(req: func.HttpRequest) -> func.HttpResponse:
                 ),
             ),
         )
-        ci   = _col_idx(result.columns, "cost")
+        ci   = _col_idx(result.columns, "PreTaxCost")
         di   = _col_idx(result.columns, "UsageDate")
         rows = sorted(result.rows, key=lambda r: r[di])
         today = _today()
@@ -448,7 +448,7 @@ def top_drivers_handler(req: func.HttpRequest) -> func.HttpResponse:
                 ),
             ),
         )
-        ci    = _col_idx(result.columns, "cost")
+        ci    = _col_idx(result.columns, "PreTaxCost")
         si    = _col_idx(result.columns, "ServiceName")
         all_rows = sorted(
             result.rows, key=lambda r: float(r[ci]), reverse=True
@@ -503,7 +503,7 @@ def forecast_handler(req: func.HttpRequest) -> func.HttpResponse:
                 include_fresh_partial_cost=False,
             ),
         )
-        ci            = _col_idx(result.columns, "cost")
+        ci            = _col_idx(result.columns, "PreTaxCost")
         remaining     = sum(float(r[ci]) for r in result.rows)
         projected     = mtd_cost + remaining
 
