@@ -260,7 +260,11 @@ def _text_resp(body: str) -> func.HttpResponse:
     return func.HttpResponse(body, status_code=200, mimetype="text/plain")
 
 
-def _error_resp(msg: str) -> func.HttpResponse:
+def _error_resp(exc: Exception) -> func.HttpResponse:
+    msg = str(exc)
+    # Propagate Cost Management rate-limit responses so callers can back off.
+    if "429" in msg or "too many requests" in msg.lower():
+        return func.HttpResponse(msg, status_code=429, mimetype="text/plain")
     return func.HttpResponse(msg, status_code=500, mimetype="text/plain")
 
 
@@ -294,7 +298,7 @@ def mtd_handler(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as exc:
         logging.error("mtd_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)
 
 
 @app.route(route="cost/by-service", methods=["POST"])
@@ -336,7 +340,7 @@ def by_service_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _text_resp("\n".join(lines))
     except Exception as exc:
         logging.error("by_service_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)
 
 
 @app.route(route="cost/compare-months", methods=["POST"])
@@ -374,7 +378,7 @@ def compare_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _text_resp("\n".join(lines))
     except Exception as exc:
         logging.error("compare_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)
 
 
 @app.route(route="cost/daily-trend", methods=["POST"])
@@ -419,7 +423,7 @@ def daily_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _text_resp("\n".join(lines))
     except Exception as exc:
         logging.error("daily_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)
 
 
 @app.route(route="cost/top-drivers", methods=["POST"])
@@ -465,7 +469,7 @@ def top_drivers_handler(req: func.HttpRequest) -> func.HttpResponse:
         return _text_resp("\n".join(lines))
     except Exception as exc:
         logging.error("top_drivers_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)
 
 
 @app.route(route="cost/forecast", methods=["POST"])
@@ -515,4 +519,4 @@ def forecast_handler(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as exc:
         logging.error("forecast_handler: %s", exc)
-        return _error_resp(str(exc))
+        return _error_resp(exc)

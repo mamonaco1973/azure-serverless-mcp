@@ -64,31 +64,43 @@ echo "NOTE: Token acquired."
 
 call_api() {
   local method="$1" route="$2"
-  local tmp_file http_code body
+  local tmp_file http_code body wait=5
 
   tmp_file=$(mktemp)
 
-  if [[ "$method" == "GET" ]]; then
-    http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
-      -X GET "${FUNC_APP_URL}/${route}" \
-      -H "Authorization: Bearer ${TOKEN}" \
-      < /dev/null)
-  else
-    http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
-      -X POST "${FUNC_APP_URL}/${route}" \
-      -H "Authorization: Bearer ${TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "{}" \
-      < /dev/null)
-  fi
+  while true; do
+    if [[ "$method" == "GET" ]]; then
+      http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
+        -X GET "${FUNC_APP_URL}/${route}" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        < /dev/null)
+    else
+      http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
+        -X POST "${FUNC_APP_URL}/${route}" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{}" \
+        < /dev/null)
+    fi
+
+    [[ "$http_code" != "429" ]] && break
+
+    # Rate limited — back off and retry.
+    echo "NOTE: Rate limited on ${method} /${route} — retrying in ${wait}s..."
+    sleep "$wait"
+    wait=$((wait * 2))
+  done
 
   body=$(cat "$tmp_file")
   rm -f "$tmp_file"
 
   if [[ "$http_code" == "200" ]]; then
     echo "NOTE: OK  ${method} /${route}"
-    # Print a preview of the response.
-    echo "$body" | head -3 | sed 's/^/       /'
+    if [[ "$route" == "tools" ]]; then
+      echo "$body" | jq -r '.[] | "       \(.name)  →  \(.route)"'
+    else
+      echo "$body" | head -3 | sed 's/^/       /'
+    fi
   else
     echo "ERROR: FAIL ${method} /${route} — HTTP ${http_code}"
     echo "  $body"
