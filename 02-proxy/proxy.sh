@@ -3,23 +3,25 @@
 # File: proxy.sh
 #
 # Purpose:
-#   MCP stdio proxy for the Cost Explorer serverless API. Reads JSON-RPC 2.0
-#   messages from stdin, signs POST requests to API Gateway with AWS SigV4,
-#   and writes tool results back to stdout. The AI caller sees a local MCP
-#   server — the Lambda backend is fully transparent.
+#   MCP stdio proxy for the Azure Cost Management serverless API. Reads JSON-RPC
+#   2.0 messages from stdin, acquires a Bearer token from Azure AD using the
+#   client-credentials flow, and forwards tool calls to the Function App.
+#   The AI caller sees a local MCP server — the Azure backend is transparent.
 #
-#   On startup the proxy calls GET /tools (SigV4 signed) to load the tool
-#   registry from the backend. Route mappings and tool schemas require no
-#   hardcoding in this file — add a tool in costs.py and redeploy.
+#   On startup the proxy calls GET /tools (authenticated) to load the tool
+#   registry. Route mappings and tool schemas require no hardcoding here —
+#   add a tool in function_app.py and redeploy; the proxy auto-discovers it.
 #
 # Dependencies:
-#   bash 4+, curl, jq, openssl
+#   bash 4+, curl, jq
 #
 # Required environment variables:
-#   MCP_ACCESS_KEY_ID      IAM access key for the cost-mcp-proxy user
-#   MCP_SECRET_ACCESS_KEY  IAM secret key for the cost-mcp-proxy user
-#   MCP_API_ENDPOINT       API Gateway invoke URL (no trailing slash)
-#   MCP_REGION             AWS region (default: us-east-1)
+#   MCP_CLIENT_ID      Proxy service principal client ID
+#   MCP_CLIENT_SECRET  Proxy service principal client secret
+#   MCP_TENANT_ID      Azure AD tenant ID
+#   MCP_API_CLIENT_ID  API app registration client ID (used as token scope)
+#   MCP_API_ENDPOINT   Function App base URL — no trailing slash
+#                      (e.g. https://cost-mcp-func-xxxx.azurewebsites.net/api)
 # ================================================================================
 
 set -euo pipefail
@@ -28,11 +30,49 @@ set -euo pipefail
 # Configuration
 # ================================================================================
 
-ACCESS_KEY="${MCP_ACCESS_KEY_ID:?MCP_ACCESS_KEY_ID is required}"
-SECRET_KEY="${MCP_SECRET_ACCESS_KEY:?MCP_SECRET_ACCESS_KEY is required}"
+CLIENT_ID="${MCP_CLIENT_ID:?MCP_CLIENT_ID is required}"
+CLIENT_SECRET="${MCP_CLIENT_SECRET:?MCP_CLIENT_SECRET is required}"
+TENANT_ID="${MCP_TENANT_ID:?MCP_TENANT_ID is required}"
+API_CLIENT_ID="${MCP_API_CLIENT_ID:?MCP_API_CLIENT_ID is required}"
 API_ENDPOINT="${MCP_API_ENDPOINT:?MCP_API_ENDPOINT is required}"
-REGION="${MCP_REGION:-us-east-1}"
 MCP_USER="${USER:-$(whoami)}"
+
+# ================================================================================
+# Token management
+# ================================================================================
+
+TOKEN=""
+TOKEN_EXPIRY=0
+
+acquire_token() {
+    local response
+    # Redirect curl stdin so it does not consume MCP messages from stdin.
+    response=$(curl -s -X POST \
+        "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=client_credentials\
+&client_id=${CLIENT_ID}\
+&client_secret=${CLIENT_SECRET}\
+&scope=${API_CLIENT_ID}/.default" \
+        < /dev/null)
+
+    TOKEN=$(echo "$response" | jq -r '.access_token // empty')
+    if [[ -z "$TOKEN" ]]; then
+        echo "ERROR: Token acquisition failed: $(echo "$response" | jq -r '.error_description // .')" >&2
+        exit 1
+    fi
+
+    local expires_in
+    expires_in=$(echo "$response" | jq -r '.expires_in // 3600')
+    # Refresh 60 seconds before actual expiry to avoid mid-call failures.
+    TOKEN_EXPIRY=$(( $(date +%s) + expires_in - 60 ))
+}
+
+ensure_token() {
+    if [[ -z "$TOKEN" || $(date +%s) -ge $TOKEN_EXPIRY ]]; then
+        acquire_token
+    fi
+}
 
 # ================================================================================
 # Tool registry — populated at startup from GET /tools
@@ -42,100 +82,24 @@ declare -A TOOL_ROUTES
 TOOLS_JSON='[]'
 
 # ================================================================================
-# SigV4 signing helpers
+# HTTP helpers
 # ================================================================================
 
-sha256_hex() {
-    echo -n "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'
-}
+invoke_request() {
+    local method="$1" url="$2" body="${3:-}"
+    ensure_token
 
-# HMAC-SHA256 with a plain string key — used for the first step of key derivation.
-hmac_sha256_str() {
-    local key="$1" data="$2"
-    echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt "key:${key}" -hex | sed 's/^.*= //'
-}
-
-# HMAC-SHA256 with a hex-encoded binary key — used for subsequent derivation steps.
-hmac_sha256_hex() {
-    local hex_key="$1" data="$2"
-    echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${hex_key}" -hex | sed 's/^.*= //'
-}
-
-invoke_signed_request() {
-    local method="$1"
-    local url="$2"
-    local body="${3:-}"
-    local service="execute-api"
-
-    local now date_stamp host uri_path
-    now=$(date -u '+%Y%m%dT%H%M%SZ')
-    date_stamp="${now:0:8}"
-    host=$(echo "$url" | sed 's|https://||' | cut -d'/' -f1)
-    uri_path=$(echo "$url" | sed "s|https://${host}||")
-
-    local payload_hash canonical_headers signed_headers canonical_request
-
-    if [[ "$method" == "GET" ]]; then
-        # GET carries no body — payload hash is SHA-256 of empty string.
-        payload_hash=$(sha256_hex "")
-        canonical_headers="host:${host}
-x-amz-date:${now}
-x-mcp-user:${MCP_USER}
-"
-        signed_headers="host;x-amz-date;x-mcp-user"
-    else
-        # POST: hash the provided body, include Content-Type in signed headers.
-        local effective_body="${body:-{\}}"
-        payload_hash=$(sha256_hex "$effective_body")
-        canonical_headers="content-type:application/json
-host:${host}
-x-amz-date:${now}
-x-mcp-user:${MCP_USER}
-"
-        signed_headers="content-type;host;x-amz-date;x-mcp-user"
-        body="$effective_body"
-    fi
-
-    canonical_request="${method}
-${uri_path}
-
-${canonical_headers}
-${signed_headers}
-${payload_hash}"
-
-    # String to sign — binds to date, region, and service.
-    local credential_scope cr_hash string_to_sign
-    credential_scope="${date_stamp}/${REGION}/${service}/aws4_request"
-    cr_hash=$(sha256_hex "$canonical_request")
-    string_to_sign="AWS4-HMAC-SHA256
-${now}
-${credential_scope}
-${cr_hash}"
-
-    # Four-step HMAC key derivation chain.
-    local k_date k_region k_service k_signing signature
-    k_date=$(hmac_sha256_str    "AWS4${SECRET_KEY}" "$date_stamp")
-    k_region=$(hmac_sha256_hex  "$k_date"           "$REGION")
-    k_service=$(hmac_sha256_hex "$k_region"         "$service")
-    k_signing=$(hmac_sha256_hex "$k_service"        "aws4_request")
-    signature=$(hmac_sha256_hex "$k_signing"        "$string_to_sign")
-
-    local auth_header="AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${credential_scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
-
-    # Redirect curl stdin from /dev/null so it does not consume MCP messages.
     if [[ "$method" == "GET" ]]; then
         curl -s -X GET "$url" \
-            -H "Authorization: ${auth_header}" \
-            -H "x-amz-date: ${now}" \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H "x-mcp-user: ${MCP_USER}" \
             < /dev/null
     else
         curl -s -X POST "$url" \
-            -H "Authorization: ${auth_header}" \
-            -H "x-amz-date: ${now}" \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
             -H "x-mcp-user: ${MCP_USER}" \
-            -d "$body" \
+            -d "${body:-{\}}" \
             < /dev/null
     fi
 }
@@ -149,13 +113,13 @@ load_tool_registry() {
     echo "NOTE: Discovering tools from ${url} ..." >&2
 
     local registry
-    if ! registry=$(invoke_signed_request "GET" "$url"); then
+    if ! registry=$(invoke_request "GET" "$url"); then
         echo "ERROR: Tool discovery request failed." >&2
         exit 1
     fi
 
     if [[ -z "$registry" ]] || ! echo "$registry" | jq -e . > /dev/null 2>&1; then
-        echo "ERROR: Tool discovery returned invalid JSON." >&2
+        echo "ERROR: Tool discovery returned invalid JSON: ${registry}" >&2
         exit 1
     fi
 
@@ -167,7 +131,7 @@ load_tool_registry() {
         TOOL_ROUTES["$name"]="$route"
     done < <(echo "$registry" | jq -c '.[]')
 
-    # Build the tools/list payload — strip route before forwarding to the AI.
+    # Strip route before forwarding the tool list to the AI.
     TOOLS_JSON=$(echo "$registry" | jq -c '[.[] | {name, description, inputSchema}]')
 
     local count
@@ -201,7 +165,7 @@ handle_initialize() {
     result=$(jq -cn '{
         "protocolVersion": "2025-11-25",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "cost-explorer-mcp", "version": "1.0.0"}
+        "serverInfo": {"name": "azure-cost-mcp", "version": "1.0.0"}
     }')
     send_response "$id" "$result"
 }
@@ -233,7 +197,7 @@ handle_tools_call() {
     local url="${API_ENDPOINT%/}${route}"
     local text
 
-    if ! text=$(invoke_signed_request "POST" "$url" "{}"); then
+    if ! text=$(invoke_request "POST" "$url" "{}"); then
         send_error "$id" -32603 "Tool invocation failed: curl error"
         return
     fi
@@ -247,8 +211,8 @@ handle_tools_call() {
 # Main
 # ================================================================================
 
-echo "NOTE: Cost Explorer MCP proxy started." >&2
-echo "NOTE: Endpoint: ${API_ENDPOINT}  Region: ${REGION}" >&2
+echo "NOTE: Azure Cost MCP proxy started." >&2
+echo "NOTE: Endpoint: ${API_ENDPOINT}" >&2
 
 load_tool_registry
 
@@ -279,7 +243,8 @@ while IFS= read -r line; do
             [[ "$id_raw" != "null" ]] && handle_tools_call "$id_raw" "$params"
             ;;
         *)
-            [[ "$id_raw" != "null" ]] && send_error "$id_raw" -32601 "Method not found: $method"
+            [[ "$id_raw" != "null" ]] && \
+                send_error "$id_raw" -32601 "Method not found: $method"
             ;;
     esac
 done

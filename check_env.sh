@@ -1,40 +1,46 @@
 #!/bin/bash
+set -euo pipefail
 
-echo "NOTE: Validating that required commands are found in your PATH."
-# List of required commands
-commands=("aws" "terraform" "jq")
+echo "NOTE: Validating required commands..."
 
-# Flag to track if all commands are found
+commands=("az" "terraform" "jq" "zip" "envsubst")
 all_found=true
 
-# Iterate through each command and check if it's available
 for cmd in "${commands[@]}"; do
-  if ! command -v "$cmd" &> /dev/null; then
-    echo "ERROR: $cmd is not found in the current PATH."
-    all_found=false
+  if command -v "$cmd" &> /dev/null; then
+    echo "NOTE: $cmd found."
   else
-    echo "NOTE: $cmd is found in the current PATH."
+    echo "ERROR: $cmd not found in PATH."
+    all_found=false
   fi
 done
 
-# Final status
-if [ "$all_found" = true ]; then
-  echo "NOTE: All required commands are available."
-else
-  echo "ERROR: One or more commands are missing."
-  exit 1
-fi
+[ "$all_found" = true ] || exit 1
 
-echo "NOTE: Checking AWS cli connection."
+echo "NOTE: Validating required environment variables..."
 
-aws sts get-caller-identity --query "Account" --output text >> /dev/null
+required_vars=("ARM_CLIENT_ID" "ARM_CLIENT_SECRET" "ARM_SUBSCRIPTION_ID" "ARM_TENANT_ID")
+all_set=true
 
-# Check the return code of the login command
-if [ $? -ne 0 ]; then
-  echo "ERROR: Failed to connect to AWS. Please check your credentials and environment variables."
-  exit 1
-else
-  echo "NOTE: Successfully logged into AWS."
-fi
+for var in "${required_vars[@]}"; do
+  if [ -z "${!var:-}" ]; then
+    echo "ERROR: $var is not set."
+    all_set=false
+  else
+    echo "NOTE: $var is set."
+  fi
+done
+
+[ "$all_set" = true ] || exit 1
+
+echo "NOTE: Logging in to Azure..."
+az login \
+  --service-principal \
+  --username  "$ARM_CLIENT_ID" \
+  --password  "$ARM_CLIENT_SECRET" \
+  --tenant    "$ARM_TENANT_ID" \
+  > /dev/null 2>&1
+
+echo "NOTE: Azure login successful."
 
 

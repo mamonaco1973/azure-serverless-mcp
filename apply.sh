@@ -3,91 +3,101 @@
 # File: apply.sh
 #
 # Purpose:
-#   Orchestrates end-to-end deployment of the Cost Explorer MCP API stack.
-#   This includes environment validation and Lambda/API Gateway infrastructure.
+#   Orchestrates end-to-end deployment of the Azure Cost MCP API stack:
+#   environment validation → Terraform (infra + Entra + Key Vault) →
+#   function code deploy → Claude Desktop config generation → validation.
 # ================================================================================
 
-# ------------------------------------------------------------------------------
-# Global configuration
-# ------------------------------------------------------------------------------
-
-# Default AWS region for all CLI and Terraform operations.
-export AWS_DEFAULT_REGION="us-east-1"
-
-# Enable strict shell behavior:
-#   -e  Exit immediately on error
-#   -u  Treat unset variables as errors
-#   -o pipefail  Fail pipelines if any command fails
 set -euo pipefail
 
-# ------------------------------------------------------------------------------
+# ================================================================================
 # Environment pre-check
-# ------------------------------------------------------------------------------
+# ================================================================================
 
-# Validate that required tools, credentials, and environment variables
-# are present before proceeding with any infrastructure deployment.
 echo "NOTE: Running environment validation..."
 ./check_env.sh
 
-# ------------------------------------------------------------------------------
-# Build Lambda functions and API Gateway
-# ------------------------------------------------------------------------------
+# ================================================================================
+# Deploy infrastructure
+# ================================================================================
 
-# Deploys backend infrastructure including:
-#   - Six Lambda functions (one per MCP cost tool)
-#   - API Gateway (HTTP API with IAM authorization)
-#   - IAM roles scoped to Cost Explorer read permissions
-# using Terraform configuration in the 01-lambdas directory.
-echo "NOTE: Building Lambdas and API Gateway..."
+echo "NOTE: Deploying Azure Functions infrastructure..."
 
-cd 01-lambdas || {
-  echo "ERROR: 01-lambdas directory missing."
-  exit 1
-}
-
-terraform init
+cd 01-functions
+terraform init -upgrade
 terraform apply -auto-approve
 
-cd .. || exit
+RESOURCE_GROUP=$(terraform output -raw resource_group_name)
+FUNC_APP_NAME=$(terraform output -raw function_app_name)
+KV_NAME=$(terraform output -raw key_vault_name)
+FUNC_APP_URL=$(terraform output -raw function_app_url)
+cd ..
 
-# ------------------------------------------------------------------------------
+echo "NOTE: Resource group: ${RESOURCE_GROUP}"
+echo "NOTE: Function app:   ${FUNC_APP_NAME}"
+echo "NOTE: Key vault:      ${KV_NAME}"
+
+# ================================================================================
+# Deploy function code
+# ================================================================================
+
+echo "NOTE: Packaging and deploying function code..."
+
+cd 01-functions/code
+rm -f app.zip
+zip -r app.zip . \
+  -x "*__pycache__*" \
+  -x "*.pyc" \
+  -x "*.DS_Store"
+
+az functionapp deployment source config-zip \
+  --name           "$FUNC_APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --src            app.zip \
+  --build-remote   true
+
+rm -f app.zip
+cd ../..
+
+# ================================================================================
 # Generate Claude Desktop MCP config
-# ------------------------------------------------------------------------------
+# ================================================================================
 
-# Pulls the proxy credentials from Secrets Manager and substitutes them into
-# the config template. The output file is gitignored — never committed.
-echo "NOTE: Generating Claude Desktop config..."
+# Reads proxy credentials from Key Vault and substitutes them into the config
+# templates. Output files are gitignored — they contain real secrets.
+echo "NOTE: Reading proxy credentials from Key Vault..."
 
-SECRET=$(aws secretsmanager get-secret-value \
-  --secret-id cost-mcp-proxy \
-  --query SecretString \
-  --output text)
+export MCP_CLIENT_ID=$(az keyvault secret show \
+  --vault-name "$KV_NAME" --name "proxy-client-id" --query value -o tsv)
+export MCP_CLIENT_SECRET=$(az keyvault secret show \
+  --vault-name "$KV_NAME" --name "proxy-client-secret" --query value -o tsv)
+export MCP_TENANT_ID=$(az keyvault secret show \
+  --vault-name "$KV_NAME" --name "proxy-tenant-id" --query value -o tsv)
+export MCP_API_CLIENT_ID=$(az keyvault secret show \
+  --vault-name "$KV_NAME" --name "api-client-id" --query value -o tsv)
+export MCP_API_ENDPOINT=$(az keyvault secret show \
+  --vault-name "$KV_NAME" --name "api-endpoint" --query value -o tsv)
 
-export MCP_ACCESS_KEY_ID=$(echo "${SECRET}"     | jq -r '.access_key_id')
-export MCP_SECRET_ACCESS_KEY=$(echo "${SECRET}" | jq -r '.secret_access_key')
-export MCP_API_ENDPOINT=$(echo "${SECRET}"      | jq -r '.api_endpoint')
-
-SUBST='${MCP_ACCESS_KEY_ID} ${MCP_SECRET_ACCESS_KEY} ${MCP_API_ENDPOINT}'
-
-envsubst "$SUBST" \
-  < 02-proxy/claude_desktop_config_ps1.json.tmpl \
-  > 02-proxy/claude_desktop_config_ps1.json
+SUBST='${MCP_CLIENT_ID} ${MCP_CLIENT_SECRET} ${MCP_TENANT_ID} ${MCP_API_CLIENT_ID} ${MCP_API_ENDPOINT}'
 
 envsubst "$SUBST" \
   < 02-proxy/claude_desktop_config_sh.json.tmpl \
   > 02-proxy/claude_desktop_config_sh.json
 
-echo "NOTE: Configs written to 02-proxy/claude_desktop_config_ps1.json and claude_desktop_config_sh.json"
+envsubst "$SUBST" \
+  < 02-proxy/claude_desktop_config_ps1.json.tmpl \
+  > 02-proxy/claude_desktop_config_ps1.json
 
-# ------------------------------------------------------------------------------
+echo "NOTE: Configs written to 02-proxy/claude_desktop_config_sh.json"
+echo "NOTE:                 and 02-proxy/claude_desktop_config_ps1.json"
+
+# ================================================================================
 # Post-deployment validation
-# ------------------------------------------------------------------------------
+# ================================================================================
 
-# Invokes each Lambda function directly to verify Cost Explorer connectivity
-# and confirm plain-text summaries are returned correctly.
-echo "NOTE: Running build validation..."
+echo "NOTE: Running post-deployment validation..."
 ./validate.sh
 
-# ================================================================================
-# End of script
-# ================================================================================
+echo ""
+echo "NOTE: Deployment complete."
+echo "NOTE: API: ${FUNC_APP_URL}"

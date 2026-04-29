@@ -2,245 +2,184 @@
 # File: proxy.ps1
 #
 # Purpose:
-#   MCP stdio proxy for the Cost Explorer serverless API. Reads JSON-RPC 2.0
-#   messages from stdin, signs POST requests to API Gateway with AWS SigV4,
-#   and writes tool results back to stdout. The AI caller sees a local MCP
-#   server — the Lambda backend is fully transparent.
+#   MCP stdio proxy for the Azure Cost Management serverless API. Reads JSON-RPC
+#   2.0 messages from stdin, acquires a Bearer token from Azure AD using the
+#   client-credentials flow, and forwards tool calls to the Function App.
+#   The AI caller sees a local MCP server — the Azure backend is transparent.
 #
-#   On startup the proxy calls GET /tools (SigV4 signed) to load the tool
-#   registry from the backend. Route mappings and tool schemas require no
-#   hardcoding in this file — add a tool in costs.py and redeploy.
+#   On startup the proxy calls GET /tools (authenticated) to load the tool
+#   registry. Route mappings and tool schemas require no hardcoding here.
 #
 # Required environment variables:
-#   MCP_ACCESS_KEY_ID      IAM access key for the cost-mcp-proxy user
-#   MCP_SECRET_ACCESS_KEY  IAM secret key for the cost-mcp-proxy user
-#   MCP_API_ENDPOINT       API Gateway invoke URL (no trailing slash)
-#   MCP_REGION             AWS region (default: us-east-1)
-#
-# Usage (Claude Desktop claude_desktop_config.json):
-#   {
-#     "mcpServers": {
-#       "aws-costs": {
-#         "command": "powershell",
-#         "args": ["-File", "C:\\path\\to\\proxy.ps1"],
-#         "env": {
-#           "MCP_ACCESS_KEY_ID":     "...",
-#           "MCP_SECRET_ACCESS_KEY": "...",
-#           "MCP_API_ENDPOINT":      "https://xxx.execute-api.us-east-1.amazonaws.com"
-#         }
-#       }
-#     }
-#   }
+#   MCP_CLIENT_ID      Proxy service principal client ID
+#   MCP_CLIENT_SECRET  Proxy service principal client secret
+#   MCP_TENANT_ID      Azure AD tenant ID
+#   MCP_API_CLIENT_ID  API app registration client ID (token scope)
+#   MCP_API_ENDPOINT   Function App base URL (no trailing slash)
 # ================================================================================
 
-# Force UTF-8 on both channels — MCP requires clean UTF-8 stdio.
-[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ================================================================================
 # Configuration
 # ================================================================================
 
-$ACCESS_KEY   = $env:MCP_ACCESS_KEY_ID
-$SECRET_KEY   = $env:MCP_SECRET_ACCESS_KEY
-$API_ENDPOINT = $env:MCP_API_ENDPOINT
-$REGION       = if ($env:MCP_REGION) { $env:MCP_REGION } else { "us-east-1" }
-$script:MCP_USER = $env:USERNAME
+$CLIENT_ID     = $env:MCP_CLIENT_ID
+$CLIENT_SECRET = $env:MCP_CLIENT_SECRET
+$TENANT_ID     = $env:MCP_TENANT_ID
+$API_CLIENT_ID = $env:MCP_API_CLIENT_ID
+$API_ENDPOINT  = $env:MCP_API_ENDPOINT
+$MCP_USER      = $env:USERNAME
 
-foreach ($name in @("MCP_ACCESS_KEY_ID", "MCP_SECRET_ACCESS_KEY", "MCP_API_ENDPOINT")) {
-    if ([string]::IsNullOrEmpty((Get-Item "env:$name" -ErrorAction SilentlyContinue).Value)) {
-        [Console]::Error.WriteLine("ERROR: Environment variable $name is required.")
+foreach ($var in @("MCP_CLIENT_ID","MCP_CLIENT_SECRET","MCP_TENANT_ID","MCP_API_CLIENT_ID","MCP_API_ENDPOINT")) {
+    if (-not (Get-Variable -Name ($var -replace "MCP_","") -ErrorAction SilentlyContinue) -or
+        [string]::IsNullOrEmpty((Get-Item "env:$var" -ErrorAction SilentlyContinue).Value)) {
+        [Console]::Error.WriteLine("ERROR: $var is required")
         exit 1
     }
 }
 
 # ================================================================================
-# Tool registry — populated at startup from GET /tools
+# Token management
 # ================================================================================
 
-# Maps MCP tool names to their API Gateway route paths.
-$script:TOOL_ROUTES = @{}
+$script:TOKEN        = ""
+$script:TOKEN_EXPIRY = [DateTimeOffset]::UtcNow
 
-# Tool schemas forwarded to the MCP client on tools/list.
-$script:TOOLS = @()
+function Acquire-Token {
+    $body = "grant_type=client_credentials" +
+            "&client_id=$([Uri]::EscapeDataString($CLIENT_ID))" +
+            "&client_secret=$([Uri]::EscapeDataString($CLIENT_SECRET))" +
+            "&scope=$([Uri]::EscapeDataString("$API_CLIENT_ID/.default"))"
 
-# ================================================================================
-# SigV4 signing
-# ================================================================================
+    $response = Invoke-WebRequest `
+        -Uri "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" `
+        -Method Post `
+        -ContentType "application/x-www-form-urlencoded" `
+        -Body $body `
+        -UseBasicParsing
 
-function Invoke-HMACSHA256 {
-    param([byte[]]$Key, [string]$Data)
-    $hmac     = New-Object System.Security.Cryptography.HMACSHA256
-    $hmac.Key = $Key
-    return $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Data))
+    $data = $response.Content | ConvertFrom-Json
+    if (-not $data.access_token) {
+        [Console]::Error.WriteLine("ERROR: Token acquisition failed: $($data.error_description)")
+        exit 1
+    }
+    $script:TOKEN        = $data.access_token
+    # Refresh 60 seconds before actual expiry.
+    $script:TOKEN_EXPIRY = [DateTimeOffset]::UtcNow.AddSeconds($data.expires_in - 60)
 }
 
-function Invoke-SignedRequest {
-    <#
-    .SYNOPSIS
-        Signs and executes an HTTP request using AWS Signature Version 4.
+function Ensure-Token {
+    if ([string]::IsNullOrEmpty($script:TOKEN) -or
+        [DateTimeOffset]::UtcNow -ge $script:TOKEN_EXPIRY) {
+        Acquire-Token
+    }
+}
 
-    .PARAMETER Method
-        HTTP method. GET omits Content-Type from signed headers and sends
-        no body. POST includes Content-Type and defaults body to "{}".
+# ================================================================================
+# Tool registry
+# ================================================================================
 
-    .PARAMETER Url
-        Full URL of the API Gateway endpoint.
+$script:TOOL_ROUTES = @{}
+$script:TOOLS_JSON  = "[]"
 
-    .PARAMETER Body
-        Request body string. Ignored for GET requests.
-    #>
+# ================================================================================
+# HTTP helpers
+# ================================================================================
+
+function Invoke-ApiRequest {
     param(
-        [string]$Method = "POST",
+        [string]$Method,
         [string]$Url,
-        [string]$Body = ""
+        [string]$Body = "{}"
     )
-
-    $uri       = [System.Uri]$Url
-    $now       = [DateTime]::UtcNow
-    $amzDate   = $now.ToString("yyyyMMddTHHmmssZ")
-    $dateStamp = $now.ToString("yyyyMMdd")
-    $service   = "execute-api"
-    $sha256    = [System.Security.Cryptography.SHA256]::Create()
-
-    # GET carries no body; POST defaults to an empty JSON object.
-    $effectiveBody = if ($Method -eq "GET") { "" } else {
-        if ([string]::IsNullOrEmpty($Body)) { "{}" } else { $Body }
-    }
-
-    $payloadHash = [BitConverter]::ToString(
-        $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($effectiveBody))
-    ).Replace("-", "").ToLower()
-
-    # GET omits Content-Type — signed headers differ by method.
-    if ($Method -eq "GET") {
-        $canonicalHeaders = "host:$($uri.Host)`nx-amz-date:$amzDate`nx-mcp-user:$($script:MCP_USER)`n"
-        $signedHeaders    = "host;x-amz-date;x-mcp-user"
-    } else {
-        $canonicalHeaders = "content-type:application/json`nhost:$($uri.Host)`nx-amz-date:$amzDate`nx-mcp-user:$($script:MCP_USER)`n"
-        $signedHeaders    = "content-type;host;x-amz-date;x-mcp-user"
-    }
-
-    $canonicalRequest = "$Method`n$($uri.AbsolutePath)`n`n$canonicalHeaders`n$signedHeaders`n$payloadHash"
-
-    # String to sign — binds the request to a specific date, region, and service.
-    $credentialScope = "$dateStamp/$REGION/$service/aws4_request"
-    $crHash          = [BitConverter]::ToString(
-        $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonicalRequest))
-    ).Replace("-", "").ToLower()
-    $stringToSign = "AWS4-HMAC-SHA256`n$amzDate`n$credentialScope`n$crHash"
-
-    # Derive the signing key via a four-step HMAC chain.
-    $kDate    = Invoke-HMACSHA256 -Key ([System.Text.Encoding]::UTF8.GetBytes("AWS4$SECRET_KEY")) -Data $dateStamp
-    $kRegion  = Invoke-HMACSHA256 -Key $kDate    -Data $REGION
-    $kService = Invoke-HMACSHA256 -Key $kRegion  -Data $service
-    $kSigning = Invoke-HMACSHA256 -Key $kService -Data "aws4_request"
-    $signature = [BitConverter]::ToString(
-        (Invoke-HMACSHA256 -Key $kSigning -Data $stringToSign)
-    ).Replace("-", "").ToLower()
-
+    Ensure-Token
     $headers = @{
-        "Authorization" = "AWS4-HMAC-SHA256 Credential=$ACCESS_KEY/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
-        "x-amz-date"    = $amzDate
-        "x-mcp-user"    = $script:MCP_USER
+        "Authorization" = "Bearer $($script:TOKEN)"
+        "x-mcp-user"    = $MCP_USER
     }
-    if ($Method -eq "POST") {
-        $headers["Content-Type"] = "application/json"
-    }
-
-    # Use Invoke-WebRequest for predictable .Content string return regardless
-    # of Content-Type — Lambda returns text/plain which Invoke-RestMethod
-    # handles inconsistently across PS versions.
     if ($Method -eq "GET") {
-        $response = Invoke-WebRequest -Method GET -Uri $Url -Headers $headers -UseBasicParsing
+        $resp = Invoke-WebRequest -Uri $Url -Method Get -Headers $headers -UseBasicParsing
     } else {
-        $response = Invoke-WebRequest -Method POST -Uri $Url -Headers $headers -Body $effectiveBody -UseBasicParsing
+        $headers["Content-Type"] = "application/json"
+        $resp = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers `
+                    -Body $Body -UseBasicParsing
     }
-    return $response.Content
+    return $resp.Content
 }
 
 # ================================================================================
 # Tool discovery
 # ================================================================================
 
-function Initialize-ToolRegistry {
-    <#
-    .SYNOPSIS
-        Calls GET /tools to load the route map and MCP schemas from the backend.
-    #>
-    $url = "$($API_ENDPOINT.TrimEnd('/'))/tools"
+function Load-ToolRegistry {
+    $url = $API_ENDPOINT.TrimEnd("/") + "/tools"
     [Console]::Error.WriteLine("NOTE: Discovering tools from $url ...")
 
-    try {
-        $json     = Invoke-SignedRequest -Method "GET" -Url $url
-        $registry = $json | ConvertFrom-Json
-    }
-    catch {
-        [Console]::Error.WriteLine("ERROR: Tool discovery failed: $_")
-        exit 1
-    }
+    $registry = Invoke-ApiRequest -Method "GET" -Url $url
+    $parsed   = $registry | ConvertFrom-Json
 
-    foreach ($entry in $registry) {
+    foreach ($entry in $parsed) {
         $script:TOOL_ROUTES[$entry.name] = $entry.route
-        $script:TOOLS += [ordered]@{
-            name        = $entry.name
-            description = $entry.description
-            inputSchema = $entry.inputSchema
-        }
     }
 
-    [Console]::Error.WriteLine("NOTE: Discovered $($script:TOOLS.Count) tool(s).")
+    # Strip route before forwarding to the AI.
+    $toolsOnly = $parsed | ForEach-Object {
+        [ordered]@{ name = $_.name; description = $_.description; inputSchema = $_.inputSchema }
+    }
+    $script:TOOLS_JSON = $toolsOnly | ConvertTo-Json -Compress -Depth 10
+    if ($parsed.Count -eq 1) {
+        $script:TOOLS_JSON = "[$($script:TOOLS_JSON)]"
+    }
+
+    [Console]::Error.WriteLine("NOTE: Discovered $($parsed.Count) tool(s).")
 }
 
 # ================================================================================
-# JSON-RPC I/O helpers
+# JSON-RPC helpers
 # ================================================================================
 
 function Send-Response {
     param($Id, $Result)
-    $msg = [ordered]@{ jsonrpc = "2.0"; id = $Id; result = $Result } |
-           ConvertTo-Json -Depth 10 -Compress
-    [Console]::Out.WriteLine($msg)
-    [Console]::Out.Flush()
+    $msg = [ordered]@{ jsonrpc = "2.0"; id = $Id; result = $Result }
+    [Console]::Out.WriteLine(($msg | ConvertTo-Json -Compress -Depth 20))
 }
 
 function Send-Error {
     param($Id, [int]$Code, [string]$Message)
     $msg = [ordered]@{
-        jsonrpc = "2.0"
-        id      = $Id
-        error   = @{ code = $Code; message = $Message }
-    } | ConvertTo-Json -Depth 5 -Compress
-    [Console]::Out.WriteLine($msg)
-    [Console]::Out.Flush()
+        jsonrpc = "2.0"; id = $Id
+        error   = [ordered]@{ code = $Code; message = $Message }
+    }
+    [Console]::Out.WriteLine(($msg | ConvertTo-Json -Compress -Depth 10))
 }
 
 # ================================================================================
 # MCP method handlers
 # ================================================================================
 
-function Invoke-Initialize {
+function Handle-Initialize {
     param($Id)
-    Send-Response -Id $Id -Result ([ordered]@{
+    $result = [ordered]@{
         protocolVersion = "2025-11-25"
         capabilities    = @{ tools = @{} }
-        serverInfo      = @{ name = "cost-explorer-mcp"; version = "1.0.0" }
-    })
+        serverInfo      = [ordered]@{ name = "azure-cost-mcp"; version = "1.0.0" }
+    }
+    Send-Response -Id $Id -Result $result
 }
 
-function Invoke-ToolsList {
+function Handle-ToolsList {
     param($Id)
-    Send-Response -Id $Id -Result @{ tools = $script:TOOLS }
+    $tools  = $script:TOOLS_JSON | ConvertFrom-Json
+    $result = [ordered]@{ tools = $tools }
+    Send-Response -Id $Id -Result $result
 }
 
-function Invoke-ToolsCall {
+function Handle-ToolsCall {
     param($Id, $Params)
 
     $toolName = $Params.name
-    if ([string]::IsNullOrEmpty($toolName)) {
+    if (-not $toolName) {
         Send-Error -Id $Id -Code -32602 -Message "Missing required parameter: name"
         return
     }
@@ -251,56 +190,46 @@ function Invoke-ToolsCall {
         return
     }
 
-    try {
-        $url    = "$($API_ENDPOINT.TrimEnd('/'))$route"
-        $text   = Invoke-SignedRequest -Method "POST" -Url $url
-        Send-Response -Id $Id -Result @{
-            content = @(@{ type = "text"; text = $text })
-        }
+    $url  = $API_ENDPOINT.TrimEnd("/") + $route
+    $text = Invoke-ApiRequest -Method "POST" -Url $url -Body "{}"
+
+    $result = [ordered]@{
+        content = @([ordered]@{ type = "text"; text = $text })
     }
-    catch {
-        [Console]::Error.WriteLine("ERROR: Tool $toolName failed: $_")
-        Send-Error -Id $Id -Code -32603 -Message "Tool invocation failed: $($_.Exception.Message)"
-    }
+    Send-Response -Id $Id -Result $result
 }
 
 # ================================================================================
 # Main
 # ================================================================================
 
-[Console]::Error.WriteLine("NOTE: Cost Explorer MCP proxy started.")
-[Console]::Error.WriteLine("NOTE: Endpoint: $API_ENDPOINT  Region: $REGION")
+[Console]::Error.WriteLine("NOTE: Azure Cost MCP proxy started.")
+[Console]::Error.WriteLine("NOTE: Endpoint: $API_ENDPOINT")
 
-Initialize-ToolRegistry
+Load-ToolRegistry
 
 while ($true) {
     $line = [Console]::In.ReadLine()
-
-    # Null means stdin was closed (host process exited) — shut down cleanly.
     if ($null -eq $line) { break }
-
-    $line = $line.Trim()
-    if ([string]::IsNullOrEmpty($line)) { continue }
+    $line = $line.TrimEnd("`r")
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
 
     try {
         $msg = $line | ConvertFrom-Json
-    }
-    catch {
+    } catch {
         [Console]::Error.WriteLine("WARN: Failed to parse JSON: $line")
         continue
     }
 
-    $method     = $msg.method
-    $idProp     = $msg.PSObject.Properties["id"]
-    $id         = if ($idProp)     { $idProp.Value }     else { $null }
-    $paramsProp = $msg.PSObject.Properties["params"]
-    $params     = if ($paramsProp) { $paramsProp.Value } else { $null }
+    $method = $msg.method
+    $id     = $msg.id
+    $params = $msg.params
 
     switch ($method) {
-        "initialize"  { Invoke-Initialize -Id $id }
-        "initialized" { }  # notification — no response
-        "tools/list"  { Invoke-ToolsList -Id $id }
-        "tools/call"  { Invoke-ToolsCall -Id $id -Params $params }
+        "initialize"              { if ($null -ne $id) { Handle-Initialize -Id $id } }
+        "notifications/initialized" { }
+        "tools/list"              { if ($null -ne $id) { Handle-ToolsList -Id $id } }
+        "tools/call"              { if ($null -ne $id) { Handle-ToolsCall -Id $id -Params $params } }
         default {
             if ($null -ne $id) {
                 Send-Error -Id $id -Code -32601 -Message "Method not found: $method"
