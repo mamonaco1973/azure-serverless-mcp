@@ -63,33 +63,20 @@ cd ../..
 # Generate Claude Desktop MCP config
 # ================================================================================
 
-# Reads proxy credentials from Key Vault and substitutes them into the config
-# templates. Output files are gitignored — they contain real secrets.
-echo "NOTE: Reading proxy credentials from Key Vault..."
+# Config JSONs are built by Terraform with all secrets embedded and stored in
+# Key Vault as single secrets. Read them out directly — no envsubst needed.
+echo "NOTE: Reading Claude Desktop configs from Key Vault..."
 
-export MCP_CLIENT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-client-id" --query value -o tsv)
-export MCP_CLIENT_SECRET=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-client-secret" --query value -o tsv)
-export MCP_TENANT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "proxy-tenant-id" --query value -o tsv)
-export MCP_API_CLIENT_ID=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "api-client-id" --query value -o tsv)
-export MCP_API_ENDPOINT=$(az keyvault secret show \
-  --vault-name "$KV_NAME" --name "api-endpoint" --query value -o tsv)
+az keyvault secret show \
+  --vault-name "$KV_NAME" --name "claude-desktop-config-ps1" \
+  --query value -o tsv > 02-proxy/claude_desktop_config_ps1.json
 
-SUBST='${MCP_CLIENT_ID} ${MCP_CLIENT_SECRET} ${MCP_TENANT_ID} ${MCP_API_CLIENT_ID} ${MCP_API_ENDPOINT}'
+az keyvault secret show \
+  --vault-name "$KV_NAME" --name "claude-desktop-config-sh" \
+  --query value -o tsv > 02-proxy/claude_desktop_config_sh.json
 
-envsubst "$SUBST" \
-  < 02-proxy/claude_desktop_config_sh.json.tmpl \
-  > 02-proxy/claude_desktop_config_sh.json
-
-envsubst "$SUBST" \
-  < 02-proxy/claude_desktop_config_ps1.json.tmpl \
-  > 02-proxy/claude_desktop_config_ps1.json
-
-echo "NOTE: Configs written to 02-proxy/claude_desktop_config_sh.json"
-echo "NOTE:                 and 02-proxy/claude_desktop_config_ps1.json"
+echo "NOTE: Configs written to 02-proxy/claude_desktop_config_ps1.json"
+echo "NOTE:                 and 02-proxy/claude_desktop_config_sh.json"
 
 # ================================================================================
 # Post-deployment validation

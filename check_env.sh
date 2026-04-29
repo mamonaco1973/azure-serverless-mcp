@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "NOTE: Validating required commands..."
 
-commands=("az" "terraform" "jq" "zip" "envsubst")
+commands=("az" "terraform" "jq" "zip")
 all_found=true
 
 for cmd in "${commands[@]}"; do

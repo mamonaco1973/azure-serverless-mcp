@@ -1,5 +1,5 @@
 azure-functions
-azure-mgmt-costmanagement
+azure-mgmt-resourcegraph
 azure-identity
 PyJWT
 cryptography

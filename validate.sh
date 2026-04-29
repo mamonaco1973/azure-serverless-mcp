@@ -3,7 +3,7 @@
 # File: validate.sh
 #
 # Purpose:
-#   Smoke-tests all seven Azure Cost MCP endpoints. Reads proxy credentials
+#   Smoke-tests all seven Azure Resource MCP endpoints. Reads proxy credentials
 #   from Key Vault, acquires a Bearer token as the proxy service principal,
 #   then calls each route and checks for HTTP 200.
 # ================================================================================
@@ -63,47 +63,38 @@ echo "NOTE: Token acquired."
 # ================================================================================
 
 call_api() {
-  local method="$1" route="$2"
-  local tmp_file http_code body wait=5
+  local method="$1" route="$2" body="${3:-}"
+  local tmp_file http_code response
 
   tmp_file=$(mktemp)
 
-  while true; do
-    if [[ "$method" == "GET" ]]; then
-      http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
-        -X GET "${FUNC_APP_URL}/${route}" \
-        -H "Authorization: Bearer ${TOKEN}" \
-        < /dev/null)
-    else
-      http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
-        -X POST "${FUNC_APP_URL}/${route}" \
-        -H "Authorization: Bearer ${TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{}" \
-        < /dev/null)
-    fi
+  if [[ "$method" == "GET" ]]; then
+    http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
+      -X GET "${FUNC_APP_URL}/${route}" \
+      -H "Authorization: Bearer ${TOKEN}" \
+      < /dev/null)
+  else
+    http_code=$(curl -s -w "%{http_code}" -o "$tmp_file" \
+      -X POST "${FUNC_APP_URL}/${route}" \
+      -H "Authorization: Bearer ${TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "${body:-{\}}" \
+      < /dev/null)
+  fi
 
-    [[ "$http_code" != "429" ]] && break
-
-    # Rate limited — back off and retry.
-    echo "NOTE: Rate limited on ${method} /${route} — retrying in ${wait}s..."
-    sleep "$wait"
-    wait=$((wait * 2))
-  done
-
-  body=$(cat "$tmp_file")
+  response=$(cat "$tmp_file")
   rm -f "$tmp_file"
 
   if [[ "$http_code" == "200" ]]; then
     echo "NOTE: OK  ${method} /${route}"
     if [[ "$route" == "tools" ]]; then
-      echo "$body" | jq -r '.[] | "       \(.name)  →  \(.route)"'
+      echo "$response" | jq -r '.[] | "       \(.name)  →  \(.route)"'
     else
-      echo "$body" | head -3 | sed 's/^/       /'
+      echo "$response" | head -4 | sed 's/^/       /'
     fi
   else
     echo "ERROR: FAIL ${method} /${route} — HTTP ${http_code}"
-    echo "  $body"
+    echo "  $response"
     exit 1
   fi
 }
@@ -117,12 +108,12 @@ echo "NOTE: Validating all endpoints..."
 echo ""
 
 call_api "GET"  "tools"
-call_api "POST" "cost/month-to-date"
-call_api "POST" "cost/by-service"
-call_api "POST" "cost/compare-months"
-call_api "POST" "cost/daily-trend"
-call_api "POST" "cost/top-drivers"
-call_api "POST" "cost/forecast"
+call_api "POST" "resources/virtual-machines"
+call_api "POST" "resources/resource-groups"
+call_api "POST" "resources/count-by-type"
+call_api "POST" "resources/by-tag"   '{"tag_key":"environment","tag_value":"test"}'
+call_api "POST" "resources/public-ips"
+call_api "POST" "resources/by-region" '{"region":"centralus"}'
 
 echo ""
 echo "========================================================================"

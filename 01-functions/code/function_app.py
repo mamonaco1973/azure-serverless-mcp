@@ -2,24 +2,11 @@ import azure.functions as func
 import json
 import os
 import logging
-import calendar
-import time
 import requests
-from datetime import datetime, timezone, timedelta
 
 from azure.identity import DefaultAzureCredential
-from azure.mgmt.costmanagement import CostManagementClient
-from azure.mgmt.costmanagement.models import (
-    QueryDefinition,
-    QueryDataset,
-    QueryAggregation,
-    QueryGrouping,
-    QueryTimePeriod,
-    ForecastDefinition,
-    ForecastDataset,
-    ForecastAggregation,
-    ForecastTimePeriod,
-)
+from azure.mgmt.resourcegraph import ResourceGraphClient
+from azure.mgmt.resourcegraph.models import QueryRequest, QueryRequestOptions
 import jwt
 from jwt.algorithms import RSAAlgorithm
 
@@ -29,11 +16,9 @@ SUBSCRIPTION_ID = os.environ["SUBSCRIPTION_ID"]
 API_CLIENT_ID   = os.environ["API_CLIENT_ID"]
 TENANT_ID       = os.environ["TENANT_ID"]
 
-SCOPE = f"/subscriptions/{SUBSCRIPTION_ID}"
-
-_credential  = DefaultAzureCredential()
-_cost_client = CostManagementClient(_credential)
-_jwks_cache  = None
+_credential = DefaultAzureCredential()
+_rg_client  = ResourceGraphClient(_credential)
+_jwks_cache = None
 
 # ================================================================================
 # Tool registry
@@ -43,58 +28,77 @@ _jwks_cache  = None
 
 TOOL_REGISTRY = [
     {
-        "name": "get_month_to_date_cost",
+        "name": "list_virtual_machines",
         "description": (
-            "Returns the total Azure spend from the first of the "
-            "current month to today."
+            "Lists all virtual machines in the subscription with "
+            "name, resource group, location, and VM size."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/month-to-date",
+        "route": "/resources/virtual-machines",
     },
     {
-        "name": "get_cost_by_service",
+        "name": "list_resource_groups",
         "description": (
-            "Returns Azure spend broken down by service for the current "
-            "month to date, sorted from highest to lowest."
+            "Lists all resource groups in the subscription with "
+            "name, location, and tag count."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/by-service",
+        "route": "/resources/resource-groups",
     },
     {
-        "name": "compare_this_month_to_last_month",
+        "name": "count_resources_by_type",
         "description": (
-            "Compares this month's spend to the same number of days in "
-            "the previous month and shows the delta and percentage change."
+            "Returns a ranked count of all resource types deployed "
+            "in the subscription."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/compare-months",
+        "route": "/resources/count-by-type",
     },
     {
-        "name": "get_daily_cost_trend",
-        "description": (
-            "Returns the daily Azure spend for the current month with "
-            "a running total."
-        ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/daily-trend",
+        "name": "find_resources_by_tag",
+        "description": "Finds all resources matching a specific tag key and value.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tag_key": {
+                    "type": "string",
+                    "description": "Tag key to search for",
+                },
+                "tag_value": {
+                    "type": "string",
+                    "description": "Tag value to match",
+                },
+            },
+            "required": ["tag_key", "tag_value"],
+        },
+        "route": "/resources/by-tag",
     },
     {
-        "name": "find_top_cost_drivers",
+        "name": "list_public_ip_addresses",
         "description": (
-            "Returns the top 10 Azure services by spend for the current "
-            "month with percentage share of total."
+            "Lists all public IP addresses in the subscription with "
+            "their assigned resource and allocation method."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/top-drivers",
+        "route": "/resources/public-ips",
     },
     {
-        "name": "forecast_month_end_cost",
+        "name": "find_resources_by_region",
         "description": (
-            "Forecasts the projected total Azure spend for the remainder "
-            "of the current month."
+            "Lists all resources deployed in a specific Azure region "
+            "(e.g. 'eastus', 'westeurope')."
         ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "route": "/cost/forecast",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "Azure region name, e.g. 'eastus'",
+                },
+            },
+            "required": ["region"],
+        },
+        "route": "/resources/by-region",
     },
 ]
 
@@ -123,8 +127,7 @@ def _validate_token(req: func.HttpRequest) -> bool:
     """Validate a service-principal Bearer JWT.
 
     Checks signature (via Azure AD JWKS), audience (must match
-    API_CLIENT_ID), and expiry. Issuer is implicitly verified by
-    the key lookup against the tenant-scoped JWKS endpoint.
+    API_CLIENT_ID), and expiry.
 
     Args:
         req: The incoming HTTP request.
@@ -167,126 +170,28 @@ def _audit_log(req: func.HttpRequest, tool: str) -> None:
 
 
 # ================================================================================
-# Cost Management helpers
+# Resource Graph helpers
 # ================================================================================
 
-def _today() -> datetime:
-    return datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
+def _rg_query(kql: str) -> list:
+    """Execute a Resource Graph KQL query and return rows as a list of dicts.
+
+    Uses objectArray result format so each row is a plain dict — no
+    column-index lookup required.
+
+    Args:
+        kql: KQL query string.
+
+    Returns:
+        List of dicts, one per result row. Empty list if no results.
+    """
+    request = QueryRequest(
+        subscriptions=[SUBSCRIPTION_ID],
+        query=kql,
+        options=QueryRequestOptions(result_format="objectArray"),
     )
-
-
-def _mtd_window() -> tuple:
-    """Return (start, end) covering the 1st of month through today.
-
-    End is exclusive (tomorrow) so today's partial data is included.
-
-    Returns:
-        Tuple of (start_datetime, end_datetime).
-    """
-    today = _today()
-    return today.replace(day=1), today + timedelta(days=1)
-
-
-def _col_idx(columns, name: str) -> int:
-    """Return the column index matching name; raises ValueError if absent.
-
-    Args:
-        columns: List of QueryColumn objects from a Cost Management result.
-        name: Column name to find.
-
-    Returns:
-        Zero-based index of the column.
-
-    Raises:
-        ValueError: If no column with the given name exists.
-    """
-    for i, col in enumerate(columns):
-        if col.name == name:
-            return i
-    available = [c.name for c in columns]
-    raise ValueError(f"Column '{name}' not found. Available: {available}")
-
-
-def _currency(columns, rows) -> str:
-    """Extract the currency code from the first result row.
-
-    Args:
-        columns: Column list from a Cost Management result.
-        rows: Row list from a Cost Management result.
-
-    Returns:
-        Currency string (e.g. "USD"), falling back to "USD" if not found.
-    """
-    idx = next(
-        (i for i, c in enumerate(columns) if "currency" in c.name.lower()),
-        None,
-    )
-    if idx is not None and rows:
-        return str(rows[0][idx])
-    return "USD"
-
-
-def _query_total(start: datetime, end: datetime) -> tuple:
-    """Query the total cost for a custom date range.
-
-    Args:
-        start: Inclusive start date.
-        end: Exclusive end date.
-
-    Returns:
-        Tuple of (cost_float, currency_string).
-    """
-    result = _cm_call(
-        _cost_client.query.usage,
-        scope=SCOPE,
-        parameters=QueryDefinition(
-            type="ActualCost",
-            timeframe="Custom",
-            time_period=QueryTimePeriod(from_property=start, to=end),
-            dataset=QueryDataset(
-                granularity="None",
-                aggregation={
-                    "cost": QueryAggregation(name="PreTaxCost", function="Sum")
-                },
-            ),
-        ),
-    )
-    if not result.rows:
-        return 0.0, "USD"
-    ci = _col_idx(result.columns, "PreTaxCost")
-    return float(result.rows[0][ci]), _currency(result.columns, result.rows)
-
-
-def _cm_call(fn, *args, **kwargs):
-    """Call a Cost Management SDK method, retrying on 429 with exponential backoff.
-
-    Args:
-        fn: Callable SDK method to invoke.
-        *args: Positional arguments forwarded to fn.
-        **kwargs: Keyword arguments forwarded to fn.
-
-    Returns:
-        The result of fn(*args, **kwargs).
-
-    Raises:
-        Exception: Re-raises after 3 retries or on non-429 errors.
-    """
-    waits = [30, 60, 90]
-    for attempt, wait in enumerate(waits + [None]):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:
-            msg = str(exc)
-            is_rate_limited = "429" in msg or "too many requests" in msg.lower()
-            if is_rate_limited and wait is not None:
-                logging.warning(
-                    "Cost Management rate limited — retrying in %ds (attempt %d)",
-                    wait, attempt + 1,
-                )
-                time.sleep(wait)
-                continue
-            raise
+    result = _rg_client.resources(request)
+    return result.data or []
 
 
 def _text_resp(body: str) -> func.HttpResponse:
@@ -312,244 +217,173 @@ def tools_handler(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 
-@app.route(route="cost/month-to-date", methods=["POST"])
-def mtd_handler(req: func.HttpRequest) -> func.HttpResponse:
+@app.route(route="resources/virtual-machines", methods=["POST"])
+def vms_handler(req: func.HttpRequest) -> func.HttpResponse:
     if not _validate_token(req):
         return _unauthorized()
-    _audit_log(req, "get_month_to_date_cost")
+    _audit_log(req, "list_virtual_machines")
     try:
-        start, end = _mtd_window()
-        cost, currency = _query_total(start, end)
-        today = _today()
-        return _text_resp(
-            f"Month-to-date cost ({today.strftime('%B %Y')}, "
-            f"day {today.day}): {cost:,.2f} {currency}"
-        )
-    except Exception as exc:
-        logging.error("mtd_handler: %s", exc)
-        return _error_resp(exc)
-
-
-@app.route(route="cost/by-service", methods=["POST"])
-def by_service_handler(req: func.HttpRequest) -> func.HttpResponse:
-    if not _validate_token(req):
-        return _unauthorized()
-    _audit_log(req, "get_cost_by_service")
-    try:
-        start, end = _mtd_window()
-        result = _cm_call(
-            _cost_client.query.usage,
-            scope=SCOPE,
-            parameters=QueryDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=QueryTimePeriod(from_property=start, to=end),
-                dataset=QueryDataset(
-                    granularity="None",
-                    aggregation={
-                        "cost": QueryAggregation(
-                            name="PreTaxCost", function="Sum"
-                        )
-                    },
-                    grouping=[
-                        QueryGrouping(type="Dimension", name="ServiceName")
-                    ],
-                ),
-            ),
-        )
-        ci   = _col_idx(result.columns, "PreTaxCost")
-        si   = _col_idx(result.columns, "ServiceName")
-        rows = sorted(result.rows, key=lambda r: float(r[ci]), reverse=True)
-        today = _today()
-        lines = [f"Cost by service ({today.strftime('%B %Y')} MTD):", ""]
-        for row in rows:
-            cost = float(row[ci])
-            if cost > 0.01:
-                svc = row[si] or "(unallocated)"
-                lines.append(f"  {svc}: {cost:,.2f}")
-        return _text_resp("\n".join(lines))
-    except Exception as exc:
-        logging.error("by_service_handler: %s", exc)
-        return _error_resp(exc)
-
-
-@app.route(route="cost/compare-months", methods=["POST"])
-def compare_handler(req: func.HttpRequest) -> func.HttpResponse:
-    if not _validate_token(req):
-        return _unauthorized()
-    _audit_log(req, "compare_this_month_to_last_month")
-    try:
-        today       = _today()
-        mtd_start   = today.replace(day=1)
-        mtd_end     = today + timedelta(days=1)
-
-        # Last month: same day-count window, capped at that month's length.
-        prev_last    = mtd_start - timedelta(days=1)
-        prev_start   = prev_last.replace(day=1)
-        prev_days    = calendar.monthrange(prev_last.year, prev_last.month)[1]
-        prev_end_day = min(today.day, prev_days)
-        prev_end     = prev_start.replace(day=prev_end_day) + timedelta(days=1)
-
-        this_cost, currency = _query_total(mtd_start, mtd_end)
-        prev_cost, _        = _query_total(prev_start, prev_end)
-
-        delta = this_cost - prev_cost
-        pct   = (delta / prev_cost * 100) if prev_cost else 0.0
-        sign  = "+" if delta >= 0 else ""
-
-        lines = [
-            f"Month-over-month comparison (day 1–{today.day}):",
-            f"  {today.strftime('%B %Y')} MTD:             "
-            f"{this_cost:>10,.2f} {currency}",
-            f"  {prev_last.strftime('%B %Y')} (same period): "
-            f"{prev_cost:>10,.2f} {currency}",
-            f"  Delta: {sign}{delta:,.2f} {currency} ({sign}{pct:.1f}%)",
-        ]
-        return _text_resp("\n".join(lines))
-    except Exception as exc:
-        logging.error("compare_handler: %s", exc)
-        return _error_resp(exc)
-
-
-@app.route(route="cost/daily-trend", methods=["POST"])
-def daily_handler(req: func.HttpRequest) -> func.HttpResponse:
-    if not _validate_token(req):
-        return _unauthorized()
-    _audit_log(req, "get_daily_cost_trend")
-    try:
-        start, end = _mtd_window()
-        result = _cm_call(
-            _cost_client.query.usage,
-            scope=SCOPE,
-            parameters=QueryDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=QueryTimePeriod(from_property=start, to=end),
-                dataset=QueryDataset(
-                    granularity="Daily",
-                    aggregation={
-                        "cost": QueryAggregation(
-                            name="PreTaxCost", function="Sum"
-                        )
-                    },
-                ),
-            ),
-        )
-        ci   = _col_idx(result.columns, "PreTaxCost")
-        di   = _col_idx(result.columns, "UsageDate")
-        rows = sorted(result.rows, key=lambda r: r[di])
-        today = _today()
-        lines = [f"Daily cost trend ({today.strftime('%B %Y')} MTD):", ""]
-        running = 0.0
-        for row in rows:
-            cost      = float(row[ci])
-            running  += cost
-            # UsageDate is an integer in YYYYMMDD format.
-            d         = str(int(row[di]))
-            date_str  = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        rows = _rg_query("""
+            Resources
+            | where type =~ 'microsoft.compute/virtualmachines'
+            | project name, resourceGroup, location,
+                vmSize = tostring(properties.hardwareProfile.vmSize)
+            | order by name asc
+        """)
+        lines = [f"Virtual machines ({len(rows)} total):", ""]
+        for r in rows:
             lines.append(
-                f"  {date_str}: {cost:>8,.2f}  "
-                f"(running: {running:,.2f})"
+                f"  {r['name']:<30}  {r['vmSize']:<20}  "
+                f"{r['resourceGroup']}  ({r['location']})"
             )
+        if not rows:
+            lines.append("  (none found)")
         return _text_resp("\n".join(lines))
     except Exception as exc:
-        logging.error("daily_handler: %s", exc)
+        logging.error("vms_handler: %s", exc)
         return _error_resp(exc)
 
 
-@app.route(route="cost/top-drivers", methods=["POST"])
-def top_drivers_handler(req: func.HttpRequest) -> func.HttpResponse:
+@app.route(route="resources/resource-groups", methods=["POST"])
+def rgs_handler(req: func.HttpRequest) -> func.HttpResponse:
     if not _validate_token(req):
         return _unauthorized()
-    _audit_log(req, "find_top_cost_drivers")
+    _audit_log(req, "list_resource_groups")
     try:
-        start, end = _mtd_window()
-        result = _cm_call(
-            _cost_client.query.usage,
-            scope=SCOPE,
-            parameters=QueryDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=QueryTimePeriod(from_property=start, to=end),
-                dataset=QueryDataset(
-                    granularity="None",
-                    aggregation={
-                        "cost": QueryAggregation(
-                            name="PreTaxCost", function="Sum"
-                        )
-                    },
-                    grouping=[
-                        QueryGrouping(type="Dimension", name="ServiceName")
-                    ],
-                ),
-            ),
-        )
-        ci    = _col_idx(result.columns, "PreTaxCost")
-        si    = _col_idx(result.columns, "ServiceName")
-        all_rows = sorted(
-            result.rows, key=lambda r: float(r[ci]), reverse=True
-        )
-        top   = all_rows[:10]
-        total = sum(float(r[ci]) for r in all_rows)
-        today = _today()
-        lines = [f"Top cost drivers ({today.strftime('%B %Y')} MTD):", ""]
-        for rank, row in enumerate(top, 1):
-            cost = float(row[ci])
-            svc  = row[si] or "(unallocated)"
-            pct  = (cost / total * 100) if total else 0.0
-            lines.append(f"  {rank:2d}. {svc}: {cost:,.2f} ({pct:.1f}%)")
+        rows = _rg_query("""
+            ResourceContainers
+            | where type =~ 'microsoft.resources/subscriptions/resourcegroups'
+            | project name, location,
+                tagCount = array_length(bag_keys(tags))
+            | order by name asc
+        """)
+        lines = [f"Resource groups ({len(rows)} total):", ""]
+        for r in rows:
+            tc   = r.get("tagCount") or 0
+            tags = f"  ({tc} tag{'s' if tc != 1 else ''})" if tc else ""
+            lines.append(f"  {r['name']:<40}  {r['location']}{tags}")
+        if not rows:
+            lines.append("  (none found)")
         return _text_resp("\n".join(lines))
     except Exception as exc:
-        logging.error("top_drivers_handler: %s", exc)
+        logging.error("rgs_handler: %s", exc)
         return _error_resp(exc)
 
 
-@app.route(route="cost/forecast", methods=["POST"])
-def forecast_handler(req: func.HttpRequest) -> func.HttpResponse:
+@app.route(route="resources/count-by-type", methods=["POST"])
+def count_by_type_handler(req: func.HttpRequest) -> func.HttpResponse:
     if not _validate_token(req):
         return _unauthorized()
-    _audit_log(req, "forecast_month_end_cost")
+    _audit_log(req, "count_resources_by_type")
     try:
-        today        = _today()
-        last_day     = calendar.monthrange(today.year, today.month)[1]
-        # Forecast from today through the last day of the month (exclusive end).
-        forecast_end = today.replace(day=last_day) + timedelta(days=1)
-
-        # Actual MTD gives the already-incurred portion of the month.
-        mtd_cost, currency = _query_total(today.replace(day=1), today)
-
-        result = _cm_call(
-            _cost_client.forecast.usage,
-            scope=SCOPE,
-            parameters=ForecastDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=ForecastTimePeriod(
-                    from_property=today,
-                    to=forecast_end,
-                ),
-                dataset=ForecastDataset(
-                    granularity="Monthly",
-                    aggregation={
-                        "cost": ForecastAggregation(
-                            name="PreTaxCost", function="Sum"
-                        )
-                    },
-                ),
-                include_actual_cost=False,
-                include_fresh_partial_cost=False,
-            ),
-        )
-        ci            = _col_idx(result.columns, "PreTaxCost")
-        remaining     = sum(float(r[ci]) for r in result.rows)
-        projected     = mtd_cost + remaining
-
-        return _text_resp(
-            f"Month-end forecast ({today.strftime('%B %Y')}):\n"
-            f"  Actual MTD (through day {today.day}): {mtd_cost:,.2f} {currency}\n"
-            f"  Projected remaining:                  {remaining:,.2f} {currency}\n"
-            f"  Projected month-end total:            {projected:,.2f} {currency}"
-        )
+        rows  = _rg_query("""
+            Resources
+            | summarize count() by type
+            | order by count_ desc
+        """)
+        total = sum(r["count_"] for r in rows)
+        lines = [f"Resources by type ({total} total):", ""]
+        for r in rows:
+            lines.append(f"  {r['count_']:>5}  {r['type']}")
+        if not rows:
+            lines.append("  (none found)")
+        return _text_resp("\n".join(lines))
     except Exception as exc:
-        logging.error("forecast_handler: %s", exc)
+        logging.error("count_by_type_handler: %s", exc)
+        return _error_resp(exc)
+
+
+@app.route(route="resources/by-tag", methods=["POST"])
+def by_tag_handler(req: func.HttpRequest) -> func.HttpResponse:
+    if not _validate_token(req):
+        return _unauthorized()
+    _audit_log(req, "find_resources_by_tag")
+    try:
+        body      = req.get_json(silent=True) or {}
+        tag_key   = str(body.get("tag_key",   "")).strip()
+        tag_value = str(body.get("tag_value", "")).strip()
+        if not tag_key or not tag_value:
+            return func.HttpResponse(
+                "tag_key and tag_value are required", status_code=400
+            )
+        # Escape single quotes to prevent KQL injection.
+        kql_key = tag_key.replace("'", "''")
+        kql_val = tag_value.replace("'", "''")
+        rows = _rg_query(f"""
+            Resources
+            | where tags['{kql_key}'] =~ '{kql_val}'
+            | project name, type, resourceGroup, location
+            | order by name asc
+        """)
+        lines = [f"Resources tagged {tag_key}={tag_value} ({len(rows)} found):", ""]
+        for r in rows:
+            lines.append(
+                f"  {r['name']:<30}  {r['type']:<50}  "
+                f"{r['resourceGroup']}  ({r['location']})"
+            )
+        if not rows:
+            lines.append("  (none found)")
+        return _text_resp("\n".join(lines))
+    except Exception as exc:
+        logging.error("by_tag_handler: %s", exc)
+        return _error_resp(exc)
+
+
+@app.route(route="resources/public-ips", methods=["POST"])
+def public_ips_handler(req: func.HttpRequest) -> func.HttpResponse:
+    if not _validate_token(req):
+        return _unauthorized()
+    _audit_log(req, "list_public_ip_addresses")
+    try:
+        rows = _rg_query("""
+            Resources
+            | where type =~ 'microsoft.network/publicipaddresses'
+            | project name, resourceGroup, location,
+                ipAddress        = tostring(properties.ipAddress),
+                allocationMethod = tostring(properties.publicIPAllocationMethod)
+            | order by name asc
+        """)
+        lines = [f"Public IP addresses ({len(rows)} total):", ""]
+        for r in rows:
+            ip     = r.get("ipAddress") or "(unassigned)"
+            method = r.get("allocationMethod", "")
+            lines.append(
+                f"  {r['name']:<30}  {ip:<18}  {method:<10}  "
+                f"{r['resourceGroup']}  ({r['location']})"
+            )
+        if not rows:
+            lines.append("  (none found)")
+        return _text_resp("\n".join(lines))
+    except Exception as exc:
+        logging.error("public_ips_handler: %s", exc)
+        return _error_resp(exc)
+
+
+@app.route(route="resources/by-region", methods=["POST"])
+def by_region_handler(req: func.HttpRequest) -> func.HttpResponse:
+    if not _validate_token(req):
+        return _unauthorized()
+    _audit_log(req, "find_resources_by_region")
+    try:
+        body   = req.get_json(silent=True) or {}
+        region = str(body.get("region", "")).strip().lower()
+        if not region:
+            return func.HttpResponse("region is required", status_code=400)
+        kql_region = region.replace("'", "''")
+        rows = _rg_query(f"""
+            Resources
+            | where location =~ '{kql_region}'
+            | project name, type, resourceGroup
+            | order by type asc, name asc
+        """)
+        lines = [f"Resources in {region} ({len(rows)} total):", ""]
+        for r in rows:
+            lines.append(
+                f"  {r['name']:<30}  {r['type']:<50}  {r['resourceGroup']}"
+            )
+        if not rows:
+            lines.append(f"  (no resources found in {region})")
+        return _text_resp("\n".join(lines))
+    except Exception as exc:
+        logging.error("by_region_handler: %s", exc)
         return _error_resp(exc)

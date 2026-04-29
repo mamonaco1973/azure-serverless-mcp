@@ -59,3 +59,47 @@ resource "azurerm_key_vault_secret" "api_endpoint" {
   key_vault_id = azurerm_key_vault.cost_mcp.id
   depends_on   = [azurerm_role_assignment.kv_secrets_officer]
 }
+
+# Full Claude Desktop config JSONs stored as single secrets — apply.sh reads
+# these directly instead of stitching values together with envsubst.
+resource "azurerm_key_vault_secret" "claude_config_ps1" {
+  name  = "claude-desktop-config-ps1"
+  value = jsonencode({
+    mcpServers = {
+      "azure-resource-mcp" = {
+        command = "powershell"
+        args    = ["-File", "REPLACE_WITH_ABSOLUTE_PATH\\azure-serverless-mcp\\02-proxy\\proxy.ps1"]
+        env = {
+          MCP_CLIENT_ID     = azuread_application.cost_mcp_proxy.client_id
+          MCP_CLIENT_SECRET = azuread_application_password.cost_mcp_proxy.value
+          MCP_TENANT_ID     = data.azurerm_client_config.current.tenant_id
+          MCP_API_CLIENT_ID = azuread_application.cost_mcp_api.client_id
+          MCP_API_ENDPOINT  = "https://${azurerm_function_app_flex_consumption.cost_mcp.default_hostname}/api"
+        }
+      }
+    }
+  })
+  key_vault_id = azurerm_key_vault.cost_mcp.id
+  depends_on   = [azurerm_role_assignment.kv_secrets_officer]
+}
+
+resource "azurerm_key_vault_secret" "claude_config_sh" {
+  name  = "claude-desktop-config-sh"
+  value = jsonencode({
+    mcpServers = {
+      "azure-resource-mcp" = {
+        command = "bash"
+        args    = ["REPLACE_WITH_ABSOLUTE_PATH/azure-serverless-mcp/02-proxy/proxy.sh"]
+        env = {
+          MCP_CLIENT_ID     = azuread_application.cost_mcp_proxy.client_id
+          MCP_CLIENT_SECRET = azuread_application_password.cost_mcp_proxy.value
+          MCP_TENANT_ID     = data.azurerm_client_config.current.tenant_id
+          MCP_API_CLIENT_ID = azuread_application.cost_mcp_api.client_id
+          MCP_API_ENDPOINT  = "https://${azurerm_function_app_flex_consumption.cost_mcp.default_hostname}/api"
+        }
+      }
+    }
+  })
+  key_vault_id = azurerm_key_vault.cost_mcp.id
+  depends_on   = [azurerm_role_assignment.kv_secrets_officer]
+}
