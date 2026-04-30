@@ -3,9 +3,8 @@
 # File: validate.sh
 #
 # Purpose:
-#   Smoke-tests all seven Azure Resource MCP endpoints. Reads proxy credentials
-#   from Key Vault, acquires a Bearer token as the proxy service principal,
-#   then calls each route and checks for HTTP 200.
+#   Smoke-tests all eight Azure Resource MCP endpoints. Acquires a Bearer token
+#   as the proxy service principal and calls each route, checking for HTTP 200.
 # ================================================================================
 
 set -euo pipefail
@@ -80,12 +79,14 @@ call_api() {
 
   if [[ "$http_code" == "200" ]]; then
     echo "NOTE: OK  ${method} /${route}"
+    echo ""
     if [[ "$route" == "tools" ]]; then
       echo "$response" | jq -r '.[] | "\(.name)\t\(.route)"' \
         | column -t -s $'\t' | sed 's/^/       /'
     else
       echo "$response" | sed 's/^/       /'
     fi
+    echo ""
   else
     echo "ERROR: FAIL ${method} /${route} — HTTP ${http_code}"
     echo "  $response"
@@ -107,7 +108,7 @@ call_api "POST" "resources/resource-groups"
 call_api "POST" "resources/count-by-type"
 call_api "POST" "resources/by-tag"   '{"tag_key":"environment","tag_value":"test"}'
 call_api "POST" "resources/public-ips"
-call_api "POST" "resources/by-resource-group" '{"resource_group":"rg-mcp-rg"}'
+call_api "POST" "resources/by-resource-group" '{"resource_group":"serverless-mcp-rg"}'
 call_api "POST" "resources/by-region" '{"region":"centralus"}'
 
 echo ""
