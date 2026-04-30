@@ -1,208 +1,197 @@
-# AWS Serverless MCP — Cost Explorer API
+# Azure Serverless MCP — Resource Graph API
 
 This project delivers a **serverless MCP (Model Context Protocol) backend** on
-AWS that lets an AI assistant query AWS costs in plain English. Six Lambda
-functions expose cost query tools behind an **Amazon API Gateway HTTP API**
-secured with **AWS IAM authorization**. A lightweight local proxy signs each
-request with SigV4, making the remote serverless API completely transparent to
-the AI caller.
+Azure that lets an AI assistant query Azure resource inventory in plain English.
+Seven Azure Functions expose resource query tools behind an **HTTP API** secured
+with **Entra ID Bearer token authentication**. A lightweight local proxy acquires
+tokens and forwards MCP calls to the Function App, making the remote serverless
+backend completely transparent to the AI caller.
 
-It uses **Terraform** and **Python (boto3)** to provision and deploy the backend,
-and a **PowerShell or Bash proxy script** to bridge the MCP stdio transport to
-the signed HTTP API.
+It uses **Terraform** and **Python (azure-mgmt-resourcegraph)** to provision and
+deploy the backend, and a **PowerShell or Bash proxy script** to bridge the MCP
+stdio transport to the authenticated HTTP API.
 
-![diagram](aws-serverless-mcp.png)
+![diagram](azure-serverless-mcp.png)
 
 This design follows a **serverless MCP architecture** where the AI thinks it is
-talking to a local tool server, while all tool logic runs in Lambda against the
-AWS Cost Explorer API. API Gateway enforces IAM authorization on every route, and
-the proxy handles credential management and SigV4 request signing.
+talking to a local tool server, while all tool logic runs in Azure Functions
+querying the Azure Resource Graph API. Entra ID enforces Bearer token
+authentication on every route, and the proxy handles token acquisition and caching.
 
 Key capabilities demonstrated:
 
-1. **Serverless MCP Tools** – Six Lambda-backed cost query tools exposed as a
-   standard MCP tool server, invokable by any MCP-compatible AI client.
-2. **IAM-Secured API** – All API Gateway routes require AWS Signature Version 4.
-   Unsigned requests are rejected before reaching Lambda.
-3. **Self-Configuring Proxy** – At startup the proxy calls `GET /tools` (SigV4
-   signed) to load route mappings and tool schemas from the backend. No tool
-   definitions are hardcoded in the proxy — add a tool in `costs.py`, redeploy,
-   and the proxy picks it up automatically on next start.
-4. **Generic Proxy Pattern** – Because the proxy contains no tool-specific logic,
-   the same script can front any serverless backend that exposes `GET /tools` in
-   this format. Point it at a different `MCP_API_ENDPOINT` to get a different tool set.
-5. **Least-Privilege IAM** – Each Lambda function carries only the Cost Explorer
-   permission it needs. A dedicated proxy IAM user holds only `execute-api:Invoke`.
-6. **Infrastructure as Code** – Terraform provisions all Lambda functions, API
-   Gateway routes, and IAM roles in a single apply.
+1. **Serverless MCP Tools** – Seven Function-backed resource query tools exposed
+   as a standard MCP tool server, invokable by any MCP-compatible AI client.
+2. **Entra ID Bearer Auth** – All routes require a valid JWT validated in-code
+   against Azure AD's JWKS endpoint. Unsigned requests are rejected before any
+   query runs.
+3. **Self-Configuring Proxy** – At startup the proxy calls `GET /tools`
+   (authenticated) to load route mappings and tool schemas from the backend. No
+   tool definitions are hardcoded in the proxy — add a tool in `function_app.py`,
+   redeploy, and the proxy picks it up automatically on next start.
+4. **Generic Proxy Pattern** – The proxy contains no tool-specific logic. Point
+   it at a different `MCP_API_ENDPOINT` to get a completely different tool set.
+5. **Managed Identity** – The Function App queries Resource Graph using a
+   System-Assigned Managed Identity with `Reader` on the subscription. No
+   credentials in code or app settings.
+6. **Infrastructure as Code** – Terraform provisions all Functions, Entra app
+   registrations, service plan, and RBAC assignments in a single apply.
 
 Together, these components form a **reference architecture for serverless MCP
-tool backends on AWS** — demonstrating how AI tools can be centrally deployed,
+tool backends on Azure** — demonstrating how AI tools can be centrally deployed,
 versioned, and secured without requiring local runtimes on the caller's machine.
 
 ## Prerequisites
 
-* [An AWS Account](https://aws.amazon.com/console/) with Cost Explorer enabled
-  (Billing console → Cost Explorer → Enable)
-* [Install AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+* An Azure subscription
+* [Install Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
 * [Install Terraform](https://developer.hashicorp.com/terraform/install)
-* `jq` in PATH (used by `apply.sh` and `validate.sh`)
-
-If this is your first time following along, we recommend starting with this video:  
-**[AWS + Terraform: Easy Setup](https://www.youtube.com/watch?v=9clW3VQLyxA)** – it walks through configuring your AWS credentials, Terraform backend, and CLI environment.
+* `jq` and `zip` in PATH (used by `apply.sh` and `validate.sh`)
+* Service principal with Contributor rights for Terraform deployment
+* Environment variables set:
+  ```
+  ARM_CLIENT_ID
+  ARM_CLIENT_SECRET
+  ARM_SUBSCRIPTION_ID
+  ARM_TENANT_ID
+  ```
 
 ## Download this Repository
 
 ```bash
-git clone https://github.com/mamonaco1973/aws-serverless-mcp.git
-cd aws-serverless-mcp
+git clone https://github.com/mamonaco1973/azure-serverless-mcp.git
+cd azure-serverless-mcp
 ```
 
 ## Build the Code
 
-Run [check_env](check_env.sh) to validate your environment, then run [apply](apply.sh) to provision the infrastructure.
+Run [check_env](check_env.sh) to validate your environment, then run
+[apply](apply.sh) to provision the infrastructure.
 
 ```bash
-~/aws-serverless-mcp$ ./apply.sh
+~/azure-serverless-mcp$ ./apply.sh
 NOTE: Running environment validation...
-NOTE: Validating that required commands are found in your PATH.
-NOTE: aws is found in the current PATH.
-NOTE: terraform is found in the current PATH.
-NOTE: jq is found in the current PATH.
-NOTE: All required commands are available.
-NOTE: Checking AWS cli connection.
-NOTE: Successfully logged into AWS.
-
-Initializing the backend...
+NOTE: az found.
+NOTE: terraform found.
+NOTE: jq found.
+NOTE: zip found.
+NOTE: Deploying Azure Functions infrastructure...
+...
+NOTE: Deployment complete.
 ```
 
 ### Build Results
 
-When the deployment completes, the following resources are created:
+When the deployment completes, the following resources are created in the
+`serverless-mcp-rg` resource group:
 
 - **Core Infrastructure:**
-  - Fully serverless architecture — no EC2 instances, containers, or VPC networking
-  - Terraform-managed provisioning of API Gateway, Lambda, IAM roles, and Secrets Manager
-  - Single-phase deploy from the `01-lambdas` directory
+  - Fully serverless — no VMs, containers, or VNet required
+  - Single-phase Terraform deploy from the `01-functions` directory
+  - FC1 (Flex Consumption) service plan — scales to zero when idle
 
-- **Security & IAM:**
-  - Six Lambda execution roles, each scoped to the exact Cost Explorer action it needs
-  - `cost-mcp-proxy` IAM user with `execute-api:Invoke` only — cannot call CE directly
-  - Proxy IAM credentials stored in Secrets Manager secret `cost-mcp-proxy`
-  - All API Gateway routes enforce `AWS_IAM` authorization — no unsigned access possible
+- **Security & Auth:**
+  - `serverless-mcp-api` Entra app registration — defines the token audience
+  - `serverless-mcp-proxy` Entra service principal — identity the proxy authenticates as
+  - JWT validated in-code (RS256, Azure AD JWKS) — FC1 does not support Easy Auth
+  - Function App Managed Identity with `Reader` on the subscription for Resource Graph
 
-- **AWS Lambda Functions:**
-  - Seven Python 3.14 Lambda functions, all sharing `costs.py`
-  - `cost-tools` — returns `TOOL_REGISTRY` as JSON for proxy self-configuration
-  - Six cost query functions — each calls Cost Explorer and returns a plain-text summary
-  - Independently deployable with scoped IAM roles per function
-
-- **Amazon API Gateway:**
-  - HTTP API (`costs-api`) with seven routes, all requiring SigV4 signing
-  - `GET /tools` — discovery endpoint; returns tool registry with names, schemas, and routes
-  - Six `POST /cost/*` routes — one per MCP tool
-  - `$default` stage with auto-deploy enabled
-  - No CORS — API is designed for server-side proxy callers only
+- **Azure Functions:**
+  - Seven Python 3.11 functions in a single `function_app.py`
+  - `GET /tools` — discovery endpoint; returns tool registry for proxy self-config
+  - Six `POST /resources/*` routes — one per MCP tool
 
 - **MCP Proxy Scripts:**
-  - `02-proxy/proxy.ps1` — Windows PowerShell proxy using .NET HMACSHA256 for signing
-  - `02-proxy/proxy.sh` — Bash proxy using `openssl` for signing (Linux / Git Bash / macOS)
-  - Both implement full MCP JSON-RPC 2.0 stdio transport with SigV4 request signing
+  - `02-proxy/proxy.ps1` — Windows PowerShell proxy with Bearer token management
+  - `02-proxy/proxy.sh` — Bash equivalent (Linux / macOS / Git Bash)
+  - Both implement full MCP JSON-RPC 2.0 stdio transport with token caching and
+    proactive refresh 60 seconds before expiry
 
 - **Claude Desktop Integration:**
   - `apply.sh` generates `02-proxy/claude_desktop_config_ps1.json` and
-    `02-proxy/claude_desktop_config_sh.json` with real credentials substituted from
-    Secrets Manager — copy the appropriate file to
-    `%APPDATA%\Claude\claude_desktop_config.json` and restart Claude Desktop
+    `02-proxy/claude_desktop_config_sh.json` directly from Terraform outputs —
+    replace `REPLACE_WITH_ABSOLUTE_PATH` with your local path and copy to
+    `%APPDATA%\Claude\claude_desktop_config.json`, then restart Claude Desktop
 
 - **Automation & Validation:**
-  - `apply.sh`, `destroy.sh`, and `check_env.sh` automate provisioning, teardown,
-    and environment validation
-  - `validate.sh` invokes each Lambda directly via `aws lambda invoke` and prints
-    the plain-text output — no SigV4 signing required for direct Lambda calls
-  - Entire workflow runs using Terraform and AWS CLI — no manual console setup required
-
-Together, these resources form a **clean serverless MCP backend** that demonstrates
-how AI tool servers can be centrally deployed and IAM-secured on AWS — scalable,
-auditable, and accessible to any MCP-compatible client via a thin local proxy.
+  - `apply.sh`, `destroy.sh`, `check_env.sh`, and `validate.sh` automate the
+    full lifecycle — no manual portal steps required
 
 ---
 
 ## MCP Tools
 
-The **Cost Explorer MCP API** exposes six tools through **Amazon API Gateway
-(HTTP API)**. All tools take no input parameters and return plain-text summaries
-suitable for direct AI narration.
+The **Azure Resource MCP API** exposes seven tools through **Azure Functions**.
+Four tools take no input parameters; three accept parameters to filter results.
+All responses are plain-text summaries suitable for direct AI narration.
 
-> Note: All routes require **AWS IAM authorization**. The local proxy signs every
-> request with SigV4 using the credentials of the `cost-mcp-proxy` IAM user.
+> All routes require a valid **Entra ID Bearer token** scoped to
+> `{serverless-mcp-api-client-id}/.default`. The proxy acquires and caches this
+> token automatically.
 
 ### Discovery Endpoint
 
-The proxy calls `GET /tools` at startup to self-configure. The `cost-tools`
-Lambda returns `TOOL_REGISTRY` from `costs.py` — the single source of truth for
-all tool metadata:
+The proxy calls `GET /tools` at startup to self-configure. `function_app.py`
+returns `TOOL_REGISTRY` — the single source of truth for all tool metadata:
 
 ```json
 [
   {
-    "name": "get_month_to_date_cost",
-    "description": "Returns total AWS spend from the first of this month through today.",
-    "inputSchema": { "type": "object", "properties": {} },
-    "route": "/cost/month-to-date"
+    "name": "list_virtual_machines",
+    "description": "Lists all virtual machines in the subscription...",
+    "inputSchema": { "type": "object", "properties": {}, "required": [] },
+    "route": "/resources/virtual-machines"
   },
   ...
 ]
 ```
 
-The proxy strips `route` before forwarding tool schemas to the AI — the AI sees
-only the standard MCP fields. Adding a new tool requires only a backend deploy;
-the proxy picks it up automatically on next start with no proxy changes required.
+The proxy strips `route` before forwarding tool schemas to the AI.
 
 ### Tool Summary
 
-| Tool | Route | Lambda | Description |
-|------|-------|--------|-------------|
-| `get_month_to_date_cost` | `POST /cost/month-to-date` | `cost-mtd` | Total AWS spend from the 1st of this month through today |
-| `get_cost_by_service` | `POST /cost/by-service` | `cost-by-service` | MTD spend broken down by AWS service, sorted descending |
-| `compare_this_month_to_last_month` | `POST /cost/compare-months` | `cost-compare` | This month MTD vs last month full total |
-| `get_daily_cost_trend` | `POST /cost/daily-trend` | `cost-daily` | Day-by-day spend for the current month with running totals |
-| `find_top_cost_drivers` | `POST /cost/top-drivers` | `cost-top-drivers` | Top 10 AWS services by spend with percentage share |
-| `forecast_month_end_cost` | `POST /cost/forecast` | `cost-forecast` | Projected remaining spend through end of month (80% CI) |
+| Tool | Route | Input | Description |
+|------|-------|-------|-------------|
+| `list_virtual_machines` | `POST /resources/virtual-machines` | none | All VMs with name, size, resource group, location |
+| `list_resource_groups` | `POST /resources/resource-groups` | none | All resource groups with location and tag count |
+| `count_resources_by_type` | `POST /resources/count-by-type` | none | Ranked count of all resource types in the subscription |
+| `find_resources_by_tag` | `POST /resources/by-tag` | `tag_key`, `tag_value` | All resources matching a specific tag key/value pair |
+| `list_public_ip_addresses` | `POST /resources/public-ips` | none | All public IPs with allocation method and location |
+| `find_resources_by_resource_group` | `POST /resources/by-resource-group` | `resource_group` | All resources in a specific resource group |
+| `find_resources_by_region` | `POST /resources/by-region` | `region` | All resources in a specific Azure region |
 
 ### Example Tool Responses
 
-**`get_month_to_date_cost`**
+**`list_resource_groups`**
 ```
-Month-to-date AWS cost (2026-04-01 through 2026-04-27): $142.38 USD
+Resource groups (4 total):
+
+  serverless-mcp-rg    centralus  (2 tags)
+  NetworkWatcherRG     centralus
+  mikes-solutions-org  westus
+  youtube-tenant-rg    centralus
 ```
 
-**`get_cost_by_service`**
+**`count_resources_by_type`**
 ```
-AWS cost by service (2026-04-01 through 2026-04-27):
-  Amazon EC2: $87.14
-  Amazon RDS: $31.20
-  AWS Lambda: $12.50
-  Amazon S3: $8.91
+Resources by type (11 total):
+
+      5  microsoft.network/networkwatchers
+      2  microsoft.operationalinsights/workspaces
+      1  microsoft.web/sites
+      1  microsoft.keyvault/vaults
+      1  microsoft.storage/storageaccounts
+      1  microsoft.insights/components
+```
+
+**`find_resources_by_region`** (with `region: "centralus"`)
+```
+Resources in centralus (8 total):
+
+  serverless-mcp-ai        microsoft.insights/components    serverless-mcp-rg
+  serverless-mcp-func-xxxx microsoft.web/sites              serverless-mcp-rg
+  serverless-mcp-plan      microsoft.web/serverfarms        serverless-mcp-rg
   ...
-```
-
-**`find_top_cost_drivers`**
-```
-Top AWS cost drivers (2026-04-01 through 2026-04-27):
-   1. Amazon EC2: $87.14 (61.2% of total)
-   2. Amazon RDS: $31.20 (21.9% of total)
-   3. AWS Lambda: $12.50 (8.8% of total)
-   ...
-
-  Total across all services: $142.38
-```
-
-**`forecast_month_end_cost`**
-```
-AWS cost forecast — remaining April 2026 (2026-04-27 through 2026-04-30):
-  Estimated remaining spend: $18.42
-  80% confidence range:      $14.10 – $23.75
 ```
 
 ---
@@ -211,11 +200,11 @@ AWS cost forecast — remaining April 2026 (2026-04-27 through 2026-04-30):
 
 | Endpoint | Method | Auth | Request Body | Response |
 |----------|--------|------|--------------|----------|
-| `/tools` | `GET` | AWS IAM | none | JSON array of tool descriptors |
-| `/cost/*` | `POST` | AWS IAM | `{}` | Plain-text human-readable summary |
+| `/tools` | `GET` | Bearer JWT | none | JSON array of tool descriptors |
+| `/resources/*` | `POST` | Bearer JWT | `{}` or `{"param": "value"}` | Plain-text human-readable summary |
 
 ---
 
 ## MCP Proxy Request Flow
 
-![flow](aws-serverless-mcp-flow.png)
+![flow](azure-serverless-mcp-flow.png)

@@ -1,3 +1,18 @@
+# ================================================================================
+# File: function_app.py
+#
+# Purpose:
+#   Seven Azure Function HTTP handlers exposing an MCP-compatible resource
+#   inventory API backed by Azure Resource Graph. All routes require a valid
+#   Entra ID Bearer token validated in-code (RS256, Azure AD JWKS) — FC1 does
+#   not support Easy Auth. The Function App's System-Assigned Managed Identity
+#   holds Reader on the subscription so no credentials appear in code or config.
+#
+# Auth flow:
+#   Proxy acquires token → Function validates JWT → Managed Identity queries
+#   Resource Graph → plain-text response returned to AI caller.
+# ================================================================================
+
 import azure.functions as func
 import json
 import os
@@ -16,8 +31,17 @@ SUBSCRIPTION_ID = os.environ["SUBSCRIPTION_ID"]
 API_CLIENT_ID   = os.environ["API_CLIENT_ID"]
 TENANT_ID       = os.environ["TENANT_ID"]
 
+# ================================================================================
+# Module-level singletons
+# Instantiated once per warm instance — avoids re-authenticating on every request.
+# DefaultAzureCredential resolves to the Function App's System-Assigned Managed
+# Identity at runtime; locally it falls through to az CLI / env var credentials.
+# ================================================================================
+
 _credential = DefaultAzureCredential()
 _rg_client  = ResourceGraphClient(_credential)
+
+# Populated on first token validation; shared across requests on a warm instance.
 _jwks_cache = None
 
 # ================================================================================
@@ -122,10 +146,17 @@ TOOL_REGISTRY = [
 
 # ================================================================================
 # Auth helpers
+# FC1 (Flex Consumption) does not support auth_settings_v2 Easy Auth, so JWT
+# validation is done in code. The checks are equivalent: signature via Azure AD
+# JWKS (RS256), audience must match API_CLIENT_ID, and expiry enforced by PyJWT.
 # ================================================================================
 
 def _get_jwks() -> dict:
     """Fetch and cache Azure AD's JWKS for Bearer token signature validation.
+
+    The JWKS document is cached for the lifetime of the warm instance.
+    A cold start re-fetches it, which is acceptable — the endpoint is fast
+    and JWKS rotation is rare.
 
     Returns:
         The JWKS document as a dict.
@@ -141,10 +172,11 @@ def _get_jwks() -> dict:
 
 
 def _validate_token(req: func.HttpRequest) -> bool:
-    """Validate a service-principal Bearer JWT.
+    """Validate a service-principal Bearer JWT on the incoming request.
 
     Checks signature (via Azure AD JWKS), audience (must match
-    API_CLIENT_ID), and expiry.
+    API_CLIENT_ID), and expiry. Returns False rather than raising so
+    callers can return a clean 401 without a 500 traceback in logs.
 
     Args:
         req: The incoming HTTP request.
@@ -159,6 +191,7 @@ def _validate_token(req: func.HttpRequest) -> bool:
     try:
         header   = jwt.get_unverified_header(token)
         jwks     = _get_jwks()
+        # Match the token's key ID to the correct public key in the JWKS set.
         key_data = next(
             (k for k in jwks["keys"] if k["kid"] == header.get("kid")),
             None,
@@ -174,6 +207,7 @@ def _validate_token(req: func.HttpRequest) -> bool:
         )
         return True
     except Exception:
+        # Any validation failure (expired, wrong audience, bad sig) → 401.
         return False
 
 
@@ -182,6 +216,8 @@ def _unauthorized() -> func.HttpResponse:
 
 
 def _audit_log(req: func.HttpRequest, tool: str) -> None:
+    # x-mcp-user is injected by the proxy so logs show which AI session called
+    # the tool, not just the service principal that holds the Bearer token.
     caller = req.headers.get("x-mcp-user", "unknown")
     logging.info("AUDIT tool=%s caller=%s", tool, caller)
 
@@ -194,7 +230,8 @@ def _rg_query(kql: str) -> list:
     """Execute a Resource Graph KQL query and return rows as a list of dicts.
 
     Uses objectArray result format so each row is a plain dict — no
-    column-index lookup required.
+    column-index lookup required. This avoids the fragile positional
+    column mapping that the default tabular format requires.
 
     Args:
         kql: KQL query string.
@@ -212,6 +249,8 @@ def _rg_query(kql: str) -> list:
 
 
 def _get_body(req: func.HttpRequest) -> dict:
+    # Azure Functions does not support the Flask-style silent=True kwarg on
+    # get_json(), so catch ValueError explicitly for requests with no body.
     try:
         return req.get_json()
     except ValueError:
@@ -228,10 +267,26 @@ def _error_resp(exc: Exception) -> func.HttpResponse:
 
 # ================================================================================
 # Routes
+# All handlers follow the same pattern: validate token → audit log → query
+# Resource Graph → format plain-text → return. Plain-text responses let the AI
+# narrate results directly without parsing nested JSON.
 # ================================================================================
 
 @app.route(route="tools", methods=["GET"])
 def tools_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """Return the tool registry so the MCP proxy can self-configure at startup.
+
+    The proxy calls this once on launch to learn route mappings and tool
+    schemas. Adding a tool here and redeploying is sufficient — no proxy
+    changes needed.
+
+    Args:
+        req: The incoming HTTP request.
+
+    Returns:
+        JSON array of tool descriptors including route, name, description,
+        and inputSchema.
+    """
     if not _validate_token(req):
         return _unauthorized()
     return func.HttpResponse(
@@ -243,6 +298,15 @@ def tools_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/virtual-machines", methods=["POST"])
 def vms_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """List all virtual machines in the subscription.
+
+    Args:
+        req: The incoming HTTP request (body ignored).
+
+    Returns:
+        Plain-text summary of VMs with name, size, resource group,
+        and location.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "list_virtual_machines")
@@ -270,6 +334,15 @@ def vms_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/resource-groups", methods=["POST"])
 def rgs_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """List all resource groups in the subscription.
+
+    Args:
+        req: The incoming HTTP request (body ignored).
+
+    Returns:
+        Plain-text summary of resource groups with name, location,
+        and tag count.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "list_resource_groups")
@@ -283,6 +356,7 @@ def rgs_handler(req: func.HttpRequest) -> func.HttpResponse:
         """)
         lines = [f"Resource groups ({len(rows)} total):", ""]
         for r in rows:
+            # tagCount is None when a resource group has no tags at all.
             tc   = r.get("tagCount") or 0
             tags = f"  ({tc} tag{'s' if tc != 1 else ''})" if tc else ""
             lines.append(f"  {r['name']:<40}  {r['location']}{tags}")
@@ -296,6 +370,15 @@ def rgs_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/count-by-type", methods=["POST"])
 def count_by_type_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """Return a ranked count of all resource types in the subscription.
+
+    Args:
+        req: The incoming HTTP request (body ignored).
+
+    Returns:
+        Plain-text ranked list of resource types with counts, most
+        common first.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "count_resources_by_type")
@@ -319,6 +402,15 @@ def count_by_type_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/by-tag", methods=["POST"])
 def by_tag_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """Find all resources matching a specific tag key and value.
+
+    Args:
+        req: HTTP request with JSON body containing tag_key and tag_value.
+
+    Returns:
+        Plain-text list of matching resources with name, type, resource
+        group, and location. HTTP 400 if tag_key or tag_value is missing.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "find_resources_by_tag")
@@ -330,7 +422,8 @@ def by_tag_handler(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 "tag_key and tag_value are required", status_code=400
             )
-        # Escape single quotes to prevent KQL injection.
+        # Escape single quotes so user input cannot break out of the KQL
+        # string literal — Resource Graph has no parameterized query API.
         kql_key = tag_key.replace("'", "''")
         kql_val = tag_value.replace("'", "''")
         rows = _rg_query(f"""
@@ -355,6 +448,15 @@ def by_tag_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/public-ips", methods=["POST"])
 def public_ips_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """List all public IP addresses in the subscription.
+
+    Args:
+        req: The incoming HTTP request (body ignored).
+
+    Returns:
+        Plain-text list of public IPs with name, address, allocation
+        method, resource group, and location.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "list_public_ip_addresses")
@@ -369,6 +471,7 @@ def public_ips_handler(req: func.HttpRequest) -> func.HttpResponse:
         """)
         lines = [f"Public IP addresses ({len(rows)} total):", ""]
         for r in rows:
+            # ipAddress is empty string when the IP is reserved but unassigned.
             ip     = r.get("ipAddress") or "(unassigned)"
             method = r.get("allocationMethod", "")
             lines.append(
@@ -385,6 +488,15 @@ def public_ips_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/by-resource-group", methods=["POST"])
 def by_resource_group_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """List all resources deployed in a specific resource group.
+
+    Args:
+        req: HTTP request with JSON body containing resource_group name.
+
+    Returns:
+        Plain-text list of resources ordered by type then name. HTTP 400
+        if resource_group is missing.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "find_resources_by_resource_group")
@@ -393,6 +505,7 @@ def by_resource_group_handler(req: func.HttpRequest) -> func.HttpResponse:
         resource_group = str(body.get("resource_group", "")).strip()
         if not resource_group:
             return func.HttpResponse("resource_group is required", status_code=400)
+        # Escape single quotes — same KQL injection risk as by-tag.
         kql_rg = resource_group.replace("'", "''")
         rows = _rg_query(f"""
             Resources
@@ -415,11 +528,23 @@ def by_resource_group_handler(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="resources/by-region", methods=["POST"])
 def by_region_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """List all resources deployed in a specific Azure region.
+
+    Args:
+        req: HTTP request with JSON body containing region name
+             (e.g. 'eastus', 'westeurope').
+
+    Returns:
+        Plain-text list of resources ordered by type then name. HTTP 400
+        if region is missing.
+    """
     if not _validate_token(req):
         return _unauthorized()
     _audit_log(req, "find_resources_by_region")
     try:
         body   = _get_body(req)
+        # Normalise to lowercase — Resource Graph location values are lowercase
+        # and the =~ operator is case-insensitive, but consistent input is safer.
         region = str(body.get("region", "")).strip().lower()
         if not region:
             return func.HttpResponse("region is required", status_code=400)
