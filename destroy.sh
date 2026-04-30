@@ -16,7 +16,8 @@ echo "NOTE: Destroying Azure infrastructure..."
 
 cd 01-functions
 terraform init -upgrade
-terraform destroy -auto-approve
+terraform destroy -auto-approve || true
+terraform destroy -auto-approve || true
 cd ..
 
 echo "NOTE: Infrastructure teardown complete."

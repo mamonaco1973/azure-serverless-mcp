@@ -97,9 +97,9 @@ When the deployment completes, the following resources are created in the
   - Function App Managed Identity with `Reader` on the subscription for Resource Graph
 
 - **Azure Functions:**
-  - Seven Python 3.11 functions in a single `function_app.py`
+  - Eight Python 3.11 handlers in a single `function_app.py`
   - `GET /tools` — discovery endpoint; returns tool registry for proxy self-config
-  - Six `POST /resources/*` routes — one per MCP tool
+  - Seven `POST /resources/*` routes — one per MCP tool
 
 - **MCP Proxy Scripts:**
   - `02-proxy/proxy.ps1` — Windows PowerShell proxy with Bearer token management
