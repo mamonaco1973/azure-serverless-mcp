@@ -195,9 +195,11 @@ handle_tools_call() {
     fi
 
     local url="${API_ENDPOINT%/}${route}"
-    local text
+    local body text
 
-    if ! text=$(invoke_request "POST" "$url" "{}"); then
+    body=$(echo "$params" | jq -c '.arguments // {}')
+
+    if ! text=$(invoke_request "POST" "$url" "$body"); then
         send_error "$id" -32603 "Tool invocation failed: curl error"
         return
     fi

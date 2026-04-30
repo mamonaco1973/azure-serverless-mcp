@@ -1,7 +1,7 @@
 resource "azurerm_storage_account" "functions" {
-  name                     = "rgmcpfunc${random_id.suffix.hex}"
-  resource_group_name      = azurerm_resource_group.rg_mcp.name
-  location                 = azurerm_resource_group.rg_mcp.location
+  name                     = "serverlessmcp${random_id.suffix.hex}"
+  resource_group_name      = azurerm_resource_group.serverless_mcp.name
+  location                 = azurerm_resource_group.serverless_mcp.location
   account_tier             = "Standard"
   account_replication_type = "LRS"
   min_tls_version          = "TLS1_2"
@@ -13,27 +13,27 @@ resource "azurerm_storage_container" "func_code" {
   container_access_type = "private"
 }
 
-resource "azurerm_service_plan" "rg_mcp" {
-  name                = "rg-mcp-plan"
-  resource_group_name = azurerm_resource_group.rg_mcp.name
-  location            = azurerm_resource_group.rg_mcp.location
+resource "azurerm_service_plan" "serverless_mcp" {
+  name                = "serverless-mcp-plan"
+  resource_group_name = azurerm_resource_group.serverless_mcp.name
+  location            = azurerm_resource_group.serverless_mcp.location
   os_type             = "Linux"
   sku_name            = "FC1"
 }
 
-resource "azurerm_application_insights" "rg_mcp" {
-  name                = "rg-mcp-ai"
-  resource_group_name = azurerm_resource_group.rg_mcp.name
-  location            = azurerm_resource_group.rg_mcp.location
+resource "azurerm_application_insights" "serverless_mcp" {
+  name                = "serverless-mcp-ai"
+  resource_group_name = azurerm_resource_group.serverless_mcp.name
+  location            = azurerm_resource_group.serverless_mcp.location
   application_type    = "web"
 }
 
-resource "azurerm_function_app_flex_consumption" "rg_mcp" {
-  name                = "rg-mcp-func-${random_id.suffix.hex}"
-  resource_group_name = azurerm_resource_group.rg_mcp.name
-  location            = azurerm_resource_group.rg_mcp.location
+resource "azurerm_function_app_flex_consumption" "serverless_mcp" {
+  name                = "serverless-mcp-func-${random_id.suffix.hex}"
+  resource_group_name = azurerm_resource_group.serverless_mcp.name
+  location            = azurerm_resource_group.serverless_mcp.location
 
-  service_plan_id = azurerm_service_plan.rg_mcp.id
+  service_plan_id = azurerm_service_plan.serverless_mcp.id
   https_only      = true
 
   storage_container_type      = "blobContainer"
@@ -57,11 +57,11 @@ resource "azurerm_function_app_flex_consumption" "rg_mcp" {
 
   app_settings = {
     FUNCTIONS_EXTENSION_VERSION           = "~4"
-    APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.rg_mcp.connection_string
+    APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.serverless_mcp.connection_string
     AzureWebJobsFeatureFlags              = "EnableWorkerIndexing"
     SUBSCRIPTION_ID                       = data.azurerm_client_config.current.subscription_id
     # Used by in-code JWT validation to verify token audience and issuer.
-    API_CLIENT_ID                         = azuread_application.rg_mcp_api.client_id
+    API_CLIENT_ID                         = azuread_application.serverless_mcp_api.client_id
     TENANT_ID                             = data.azurerm_client_config.current.tenant_id
   }
 

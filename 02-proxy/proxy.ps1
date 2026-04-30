@@ -163,16 +163,16 @@ function Handle-Initialize {
     $result = [ordered]@{
         protocolVersion = "2025-11-25"
         capabilities    = @{ tools = @{} }
-        serverInfo      = [ordered]@{ name = "azure-cost-mcp"; version = "1.0.0" }
+        serverInfo      = [ordered]@{ name = "azure-resource-mcp"; version = "1.0.0" }
     }
     Send-Response -Id $Id -Result $result
 }
 
 function Handle-ToolsList {
     param($Id)
-    $tools  = $script:TOOLS_JSON | ConvertFrom-Json
-    $result = [ordered]@{ tools = $tools }
-    Send-Response -Id $Id -Result $result
+    # Build response directly — ConvertTo-Json serializes PS arrays as
+    # {"value":[...],"Count":N} inside hashtables, which breaks MCP clients.
+    [Console]::Out.WriteLine("{`"jsonrpc`":`"2.0`",`"id`":$Id,`"result`":{`"tools`":$($script:TOOLS_JSON)}}")
 }
 
 function Handle-ToolsCall {
@@ -190,20 +190,23 @@ function Handle-ToolsCall {
         return
     }
 
-    $url  = $API_ENDPOINT.TrimEnd("/") + $route
-    $text = Invoke-ApiRequest -Method "POST" -Url $url -Body "{}"
+    $url      = $API_ENDPOINT.TrimEnd("/") + $route
+    $bodyJson = if ($Params.arguments) {
+        $Params.arguments | ConvertTo-Json -Compress -Depth 10
+    } else { "{}" }
+    $text = Invoke-ApiRequest -Method "POST" -Url $url -Body $bodyJson
 
-    $result = [ordered]@{
-        content = @([ordered]@{ type = "text"; text = $text })
-    }
-    Send-Response -Id $Id -Result $result
+    # Use ConvertTo-Json only for the scalar string to get proper escaping,
+    # then embed it directly — avoids the PS array hashtable serialization bug.
+    $textJson = $text | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine("{`"jsonrpc`":`"2.0`",`"id`":$Id,`"result`":{`"content`":[{`"type`":`"text`",`"text`":$textJson}]}}")
 }
 
 # ================================================================================
 # Main
 # ================================================================================
 
-[Console]::Error.WriteLine("NOTE: Azure Cost MCP proxy started.")
+[Console]::Error.WriteLine("NOTE: Azure Resource MCP proxy started.")
 [Console]::Error.WriteLine("NOTE: Endpoint: $API_ENDPOINT")
 
 Load-ToolRegistry
