@@ -103,6 +103,3 @@ echo "NOTE: Configs written to 02-proxy/claude_desktop_config_sh.json"
 echo "NOTE: Running post-deployment validation..."
 ./validate.sh
 
-echo ""
-echo "NOTE: Deployment complete."
-echo "NOTE: API: ${FUNC_APP_URL}"
