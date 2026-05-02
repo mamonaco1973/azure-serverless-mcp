@@ -2,17 +2,13 @@
 
 ---
 
-[ Screen recording of the Notes Demo web app — creating, editing, and deleting notes in the browser ]
+---
 
-"Do you need a secure, authenticated serverless API on AWS?"
+Do you need a clean way to run MCP backends on Azure?
 
-[ Architecture diagram — highlight flow: browser → Cognito → API Gateway → Lambda → DynamoDB ]
+In this project, we implement a reusable MCP pattern using Azure Functions and JWT based authorization.
 
-"In this project we build a fully serverless notes API using API Gateway, Lambda, and DynamoDB — secured with Cognito and provisioned entirely with Terraform."
-
-[ Terminal running apply.sh — Terraform output, ending with website URL ]
-
-"Follow along and in minutes you'll have a working, authenticated API running in your own AWS account."
+Follow along, and in minutes you’ll have a working backend that any AI client can use to call your serverless tools on Azure.
 
 ---
 
@@ -22,23 +18,38 @@
 
 "Let's walk through the architecture before we build."
 
-[ Highlight browser and S3 bucket ]
+[ Highlight: Claude Desktop ]
 
-"The user opens a static web page — which is just an HTML file served directly from a public S3 bucket."
+We start with the AI client — in this case, Claude Desktop - issuing MCP tool calls over standard JSON-RPC.
 
-[ Highlight API Gateway ]
+[ Highlight: MCP Proxy ]
 
-"The frontend talks to an API Gateway HTTP API which is attached to our lambdas."
+Those calls are handled by a lightweight MCP proxy.
 
-[ Highlight Lambda functions ]
+The proxy acts as a bridge — translating local MCP requests into HTTPS calls.
 
-"Each Lambda function handles exactly one thing — POST to create, GET to list, GET by ID to retrieve, PUT to update, DELETE to delete.
+[ Highlight: Entra ID ]
 
-[ Highlight DynamoDB ]
+It uses an Entra ID service principal to acquire a Bearer token, ensuring every request is authenticated before it ever reaches Azure.
 
-"The backend stores data in DynamoDB. Each note is a JSON document, and the lambdas read and write directly to it."
+[ Highlight: Azure Function App ]
 
+On the backend, each MCP tool is implemented as an Azure Function endpoint.
+
+
+[ Highlight: Arrow Resouce Graph]
+
+Those functions use a managed identity to query Azure services — in this case, Azure Resource Graph — and return the results.
+
+[ Full diagram highlight ]
+
+So from the AI’s perspective, this looks like a local tool server.
+
+But in reality, every request is securely routed to a serverless backend in Azure.
+
+That’s the core pattern.
 ---
+
 
 ## Build the Code
 
@@ -70,77 +81,54 @@
 
 ## Build Results
 
-[ AWS Console — us-east-1 resources ]
+[ Show Function App ]
 
-"Let's look at what was deployed."
+A serverless Azure Function App is deployed as the entry point for all MCP tool calls.
 
-[ AWS Console — API Gateway, notes-api ]
+[ Show Code ]
 
-"First is the API Gateway. This is the entry point for every API call."
+All routes are secured with an Entra ID Bearer token on every request.
 
-[ Show Routes ]
+[Show Service Principal ]
 
-"These are the five routes — each one wired to its own Lambda integration."
+A dedicated service principal is created for the proxy to authenticate against the API.
 
-[ AWS Console — Lambda functions list ]
+[ Show Proxy Config / Env]
 
-"We have five Lambda functions — one per operation. 
-Each has its own IAM role scoped to only the DynamoDB actions it needs."
+The proxy uses these credentials to acquire and cache tokens for request authentication.
 
-[ AWS Console — DynamoDB table, notes ]
+[ Show Functions ]
 
-"Next is the DynamoDB table which is the storage layer for our notes.
+Multiple Function endpoints are deployed — one per MCP tool, plus a discovery endpoint.
 
-[ AWS Console — S3 bucket, static website ]
+[ Show Python Code ]
 
-"Finally, a public S3 bucket hosts the static web application."
+ All tool logic is implemented in Python, with each handler querying Azure Resource Graph.
 
-[ Browser — Notes Demo loads ]
+[ Show Tool Registry ]
 
-"Open the website URL to launch the test application."
+A central tool registry defines all available tools, which the proxy loads dynamically at startup.
 
+[ Show Desktop JSON ]
+
+ Finally, client configuration files are generated, allowing the MCP client to connect to the backend.
+ 
 ---
 
 ## Demo
 
-[ Browser — Notes Demo, open DevTools → Network tab ]
+First, update your AI client configuration — here I’m using Claude Desktop.
 
-"Open the web app — and the browser debugger so we can watch the API calls."
+Restart the client and confirm it recognizes the serverless MCP.
 
-[ Refresh page — network calls visible ]
+Now let’s try it — show me all my resource groups.
 
-"When the app loads, it calls the list endpoint. No notes yet."
+You’ll get a complete list across the subscription.
 
-[ Clicking New — modal opens, typing a title, clicking Create ]
+Next, drill into this project’s resource group.
 
-"Now let's create a new note by selecting New."
+Now we get a full inventory of everything deployed there.
 
-[ Show API working ]
+Finally, ask it to interpret what this resource group is for.
 
-"A POST to the API is made which returns an ID."
-
-[ Clicking the note in the list ]
-
-"The new note is also selected and the API loads the content."
-
-[ Editing and clicking Save ]
-
-"Now let's update the note and select Save."
-
-[ Show network tab ]
-
-"A PUT call is made — and the updated data is stored in DynamoDB."
-
-[ Clicking Delete ]
-
-"Now let's delete the note by selecting Delete."
-
-[ Show network ]
-
-"A DELETE call is made — and the note is removed."
-
-[ Browser — empty list ]
-
-"In this demo, we've now exercised every API endpoint."
-
----
+Here it correctly identifies this as an AI assistant backend.
